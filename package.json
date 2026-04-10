@@ -1,0 +1,152 @@
+{
+  "name": "browse-supabase-migrations",
+  "displayName": "Browse Supabase Migrations",
+  "description": "Read-only VS Code view for Supabase RPC functions defined in supabase/migrations.",
+  "version": "0.0.4",
+  "private": true,
+  "publisher": "local",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/p0l0us/suabase-migration-browser.git"
+  },
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "supabaseMigrationsBrowser.refresh",
+        "title": "Refresh Supabase RPCs",
+        "icon": {
+          "light": "./media/action-refresh.svg",
+          "dark": "./media/action-refresh.svg"
+        }
+      },
+      {
+        "command": "supabaseMigrationsBrowser.openMigration",
+        "title": "Diff Latest Supabase RPC Versions",
+        "icon": {
+          "light": "./media/action-diff.svg",
+          "dark": "./media/action-diff.svg"
+        }
+      },
+      {
+        "command": "supabaseMigrationsBrowser.openSourceMigration",
+        "title": "Open Latest Migration File",
+        "icon": {
+          "light": "./media/action-open-file.svg",
+          "dark": "./media/action-open-file.svg"
+        }
+      },
+      {
+        "command": "supabaseMigrationsBrowser.openPreviousMigration",
+        "title": "Open Previous Migration File",
+        "icon": {
+          "light": "./media/action-open-previous.svg",
+          "dark": "./media/action-open-previous.svg"
+        }
+      },
+      {
+        "command": "supabaseMigrationsBrowser.openRelatedQueries",
+        "title": "Open Related Queries",
+        "icon": {
+          "light": "./media/action-related-queries.svg",
+          "dark": "./media/action-related-queries.svg"
+        }
+      },
+      {
+        "command": "supabaseMigrationsBrowser.searchRpcs",
+        "title": "Search RPCs",
+        "icon": {
+          "light": "./media/action-search.svg",
+          "dark": "./media/action-search.svg"
+        }
+      },
+      {
+        "command": "supabaseMigrationsBrowser.clearSearch",
+        "title": "Clear RPC Search",
+        "icon": {
+          "light": "./media/action-clear.svg",
+          "dark": "./media/action-clear.svg"
+        }
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "supabaseMigrationsBrowser",
+          "title": "Supabase RPCs",
+          "icon": "./media/migrations.svg"
+        }
+      ]
+    },
+    "views": {
+      "supabaseMigrationsBrowser": [
+        {
+          "id": "supabaseMigrationsBrowser.view",
+          "name": "Supabase RPC Functions"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "supabaseMigrationsBrowser.searchRpcs",
+          "when": "view == supabaseMigrationsBrowser.view",
+          "group": "navigation@1"
+        },
+        {
+          "command": "supabaseMigrationsBrowser.clearSearch",
+          "when": "view == supabaseMigrationsBrowser.view",
+          "group": "navigation@2"
+        },
+        {
+          "command": "supabaseMigrationsBrowser.refresh",
+          "when": "view == supabaseMigrationsBrowser.view",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "supabaseMigrationsBrowser.openMigration",
+          "when": "view == supabaseMigrationsBrowser.view && viewItem =~ /(^| )canDiff( |$)/",
+          "group": "inline@1"
+        },
+        {
+          "command": "supabaseMigrationsBrowser.openSourceMigration",
+          "when": "view == supabaseMigrationsBrowser.view && viewItem =~ /(^| )supabaseMigration( |$)/",
+          "group": "inline@2"
+        },
+        {
+          "command": "supabaseMigrationsBrowser.openPreviousMigration",
+          "when": "view == supabaseMigrationsBrowser.view && viewItem =~ /(^| )hasPrevious( |$)/",
+          "group": "inline@3"
+        },
+        {
+          "command": "supabaseMigrationsBrowser.openRelatedQueries",
+          "when": "view == supabaseMigrationsBrowser.view && viewItem =~ /(^| )hasRelatedQueries( |$)/",
+          "group": "inline@4"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./tsconfig.json",
+    "watch": "tsc -watch -p ./tsconfig.json",
+    "vscode:prepublish": "npm run compile",
+    "test": "vitest run --config ./vitest.config.ts",
+    "check": "npm run compile && npm run test",
+    "package:vsix": "npm run check && vsce package"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.6.2",
+    "@types/node": "^20.19.0",
+    "@types/vscode": "^1.100.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}

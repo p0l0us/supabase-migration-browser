@@ -1,0 +1,7 @@
+{
+	"window.title": "${separator}[Branch: main]${activeEditorShort}${separator}${rootName}${separator}${profileName}",
+	"chat.tools.terminal.autoApprove": {
+		"set": true,
+		"\"/Applications/Visual": true
+	}
+}

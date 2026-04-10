@@ -1,0 +1,18 @@
+{
+    "sourceFile": "src/provider.test.ts",
+    "activeCommit": 0,
+    "commits": [
+        {
+            "activePatchIndex": 0,
+            "patches": [
+                {
+                    "date": 1775812636397,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n"
+                }
+            ],
+            "date": 1775812636397,
+            "name": "Commit-0",
+            "content": "import { describe, expect, it } from 'vitest';\n\nimport { parseGitPathList, parseGitStatusPaths } from './git-status';\n\ndescribe('parseGitStatusPaths', () => {\n  it('collects modified, added, and untracked migration paths from git porcelain output', () => {\n    const stdout = [\n      ' M supabase/migrations/20260409120000_update_rpc.sql',\n      'A  supabase/migrations/20260409130000_add_rpc.sql',\n      '?? supabase/migrations/20260409140000_new_rpc.sql',\n    ].join('\\n');\n\n    expect([...parseGitStatusPaths(stdout)]).toEqual([\n      'supabase/migrations/20260409120000_update_rpc.sql',\n      'supabase/migrations/20260409130000_add_rpc.sql',\n      'supabase/migrations/20260409140000_new_rpc.sql',\n    ]);\n  });\n\n  it('uses the destination path for renamed migration files', () => {\n    const stdout = 'R  supabase/migrations/old_name.sql -> supabase/migrations/new_name.sql';\n\n    expect([...parseGitStatusPaths(stdout)]).toEqual([\n      'supabase/migrations/new_name.sql',\n    ]);\n  });\n\n  it('parses newline-delimited git path lists', () => {\n    const stdout = [\n      'supabase/migrations/20260409120000_update_rpc.sql',\n      '',\n      'supabase/migrations/20260409130000_add_rpc.sql',\n    ].join('\\n');\n\n    expect(parseGitPathList(stdout)).toEqual([\n      'supabase/migrations/20260409120000_update_rpc.sql',\n      'supabase/migrations/20260409130000_add_rpc.sql',\n    ]);\n  });\n});"
+        }
+    ]
+}

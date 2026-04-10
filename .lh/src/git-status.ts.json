@@ -1,0 +1,18 @@
+{
+    "sourceFile": "src/git-status.ts",
+    "activeCommit": 0,
+    "commits": [
+        {
+            "activePatchIndex": 0,
+            "patches": [
+                {
+                    "date": 1775812636397,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n"
+                }
+            ],
+            "date": 1775812636397,
+            "name": "Commit-0",
+            "content": "export function parseGitStatusPaths(stdout: string): Set<string> {\n  const paths = new Set<string>();\n\n  for (const line of stdout.split(/\\r?\\n/)) {\n    if (!line.trim()) {\n      continue;\n    }\n\n    const rawPath = line.slice(3).trim();\n\n    if (!rawPath) {\n      continue;\n    }\n\n    const normalizedPath = rawPath.includes(' -> ')\n      ? rawPath.split(' -> ').at(-1)?.trim()\n      : rawPath;\n\n    if (normalizedPath) {\n      paths.add(normalizedPath);\n    }\n  }\n\n  return paths;\n}\n\nexport function parseGitPathList(stdout: string): string[] {\n  const paths: string[] = [];\n\n  for (const line of stdout.split(/\\r?\\n/)) {\n    const normalizedPath = line.trim();\n\n    if (normalizedPath) {\n      paths.push(normalizedPath);\n    }\n  }\n\n  return paths;\n}"
+        }
+    ]
+}

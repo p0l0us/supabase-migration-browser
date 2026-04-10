@@ -1,0 +1,11 @@
+.git/**
+.vscode/**
+.lh/**
+ai/**
+src/**
+supabase
+supabase/**
+PLAN.md
+SPECS.md
+tsconfig.json
+vitest.config.ts
