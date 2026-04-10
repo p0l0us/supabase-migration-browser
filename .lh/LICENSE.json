@@ -1,0 +1,42 @@
+{
+    "sourceFile": "LICENSE",
+    "activeCommit": 0,
+    "commits": [
+        {
+            "activePatchIndex": 6,
+            "patches": [
+                {
+                    "date": 1775831598240,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n"
+                },
+                {
+                    "date": 1775831608953,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -1,4 +1,5 @@\n MIT License\n \n Copyright (c) 2026 Martin Polehla\n \n+If you wish to extend my project let me know. Ot\n\\ No newline at end of file\n"
+                },
+                {
+                    "date": 1775831616590,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -1,5 +1,5 @@\n MIT License\n \n Copyright (c) 2026 Martin Polehla\n \n-If you wish to extend my project let me know. Ot\n\\ No newline at end of file\n+If you wish to extend my project let me know. This is private property unless \n\\ No newline at end of file\n"
+                },
+                {
+                    "date": 1775831625795,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -1,5 +1,5 @@\n MIT License\n \n Copyright (c) 2026 Martin Polehla\n \n-If you wish to extend my project let me know. This is private property unless \n\\ No newline at end of file\n+If you wish to extend my project let me know. This is private property unless you have my \n\\ No newline at end of file\n"
+                },
+                {
+                    "date": 1775831638745,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -1,5 +1,5 @@\n MIT License\n \n Copyright (c) 2026 Martin Polehla\n \n-If you wish to extend my project let me know. This is private property unless you have my \n\\ No newline at end of file\n+If you wish to extend my project let me know. This is private property unless I say differently\n\\ No newline at end of file\n"
+                },
+                {
+                    "date": 1775831652950,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -1,5 +1,5 @@\n MIT License\n \n Copyright (c) 2026 Martin Polehla\n \n-If you wish to extend my project let me know. This is private property unless I say differently\n\\ No newline at end of file\n+If you wish to extend my project let me know. This is private property unless I say differently. \n\\ No newline at end of file\n"
+                },
+                {
+                    "date": 1775831670796,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -1,5 +1,5 @@\n MIT License\n \n Copyright (c) 2026 Martin Polehla\n \n-If you wish to extend my project let me know. This is private property unless I say differently. \n\\ No newline at end of file\n+If you wish to extend my project let me know. This is private property unless I say differently. You are not allowed to copy or publish my code without my permission.\n\\ No newline at end of file\n"
+                }
+            ],
+            "date": 1775831598240,
+            "name": "Commit-0",
+            "content": "MIT License\n\nCopyright (c) 2026 Martin Polehla\n\n"
+        }
+    ]
+}
