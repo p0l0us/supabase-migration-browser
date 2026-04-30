@@ -474,15 +474,37 @@ function getWebviewHtml(): string {
       box-sizing: border-box;
     }
 
+    html,
+    body {
+      width: 100%;
+      min-width: 0;
+      overflow-x: hidden;
+    }
+
     body {
       margin: 0;
       background: var(--vscode-sideBar-background);
       color: var(--vscode-sideBar-foreground);
       font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+      line-height: 1.4;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    button {
+      appearance: none;
+      -webkit-appearance: none;
     }
 
     .layout {
+      width: 100%;
       min-height: 100vh;
+      overflow-x: hidden;
     }
 
     .search-shell {
@@ -503,16 +525,21 @@ function getWebviewHtml(): string {
       grid-template-columns: minmax(0, 1fr) auto;
       gap: 8px;
       align-items: center;
+      min-width: 0;
     }
 
     .search-input {
       width: 100%;
+      min-width: 0;
+      min-height: 30px;
       padding: 8px 10px;
       border: 1px solid var(--vscode-input-border, transparent);
       border-radius: 8px;
       background: var(--vscode-input-background);
       color: var(--vscode-input-foreground);
       outline: none;
+      appearance: none;
+      -webkit-appearance: none;
     }
 
     .search-input:focus {
@@ -526,9 +553,11 @@ function getWebviewHtml(): string {
       background: var(--vscode-button-secondaryBackground);
       color: var(--vscode-button-secondaryForeground);
       cursor: pointer;
+      line-height: 1.3;
     }
 
     .toolbar-button {
+      min-height: 30px;
       padding: 8px 10px;
       white-space: nowrap;
     }
@@ -547,10 +576,13 @@ function getWebviewHtml(): string {
       display: grid;
       gap: 10px;
       padding: 12px;
+      min-width: 0;
     }
 
     .rpc-card,
     .empty-state {
+      width: 100%;
+      min-width: 0;
       border: 1px solid var(--vscode-sideBar-border, var(--vscode-panel-border));
       border-radius: 12px;
       background:
@@ -572,9 +604,11 @@ function getWebviewHtml(): string {
       align-items: flex-start;
       justify-content: space-between;
       padding: 12px 12px 6px;
+      min-width: 0;
     }
 
     .rpc-title {
+      min-width: 0;
       margin: 0;
       font-size: 13px;
       line-height: 1.4;
@@ -603,9 +637,11 @@ function getWebviewHtml(): string {
       flex-wrap: wrap;
       gap: 8px;
       padding: 12px;
+      min-width: 0;
     }
 
     .action-button {
+      min-height: 26px;
       padding: 6px 10px;
       font-size: 12px;
     }

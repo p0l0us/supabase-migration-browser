@@ -2,7 +2,7 @@
   "name": "browse-supabase-migrations",
   "displayName": "Browse Supabase Migrations",
   "description": "Read-only VS Code view for Supabase RPC functions defined in supabase/migrations. Later I'm planning to add features like browsing table definitions, triggers, and more. The extension will be extended as I use it myself, so if you have any feature requests or want to contribute, please let me know!",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "private": true,
   "publisher": "p0l0us",
   "author": "Martin Polehla <polehla@gmail.com>",
@@ -101,6 +101,7 @@
         {
           "id": "supabaseMigrationsBrowser.view",
           "name": "Supabase RPC Functions",
+          "icon": "./media/migrations.svg",
           "type": "webview"
         }
       ]
@@ -131,7 +132,8 @@
     "vscode:prepublish": "npm run compile",
     "test": "vitest run --config ./vitest.config.ts",
     "check": "npm run compile && npm run test",
-    "package:vsix": "npm run check && vsce package"
+    "package:vsix": "npm run check && vsce package",
+    "install:local": "npm run package:vsix && node ./scripts/install-local.cjs"
   },
   "devDependencies": {
     "@vscode/vsce": "^3.6.2",

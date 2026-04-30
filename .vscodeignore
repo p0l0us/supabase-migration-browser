@@ -2,6 +2,7 @@
 .vscode/**
 .lh/**
 ai/**
+scripts/**
 src/**
 supabase
 supabase/**
