@@ -9,3 +9,29 @@ PLAN.md
 SPECS.md
 tsconfig.json
 vitest.config.ts
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+.npmrc
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+*secret*
+*credential*
+
+# Personal shell/editor/workstation files that should never be published
+.bash_profile
+.bashrc
+.gitconfig
+.gitmodules
+.idea
+.idea/**
+.mcp.json
+.profile
+.ripgreprc
+.zprofile
+.zshrc

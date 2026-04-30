@@ -1,10 +1,13 @@
 {
   "name": "browse-supabase-migrations",
   "displayName": "Browse Supabase Migrations",
-  "description": "Read-only VS Code view for Supabase RPC functions defined in supabase/migrations.",
-  "version": "0.0.4",
+  "description": "Read-only VS Code view for Supabase RPC functions defined in supabase/migrations. Later I'm planning to add features like browsing table definitions, triggers, and more. The extension will be extended as I use it myself, so if you have any feature requests or want to contribute, please let me know!",
+  "version": "0.0.5",
   "private": true,
-  "publisher": "local",
+  "publisher": "p0l0us",
+  "author": "Martin Polehla <polehla@gmail.com>",
+  "license": "MIT",
+  "icon": "media/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/p0l0us/suabase-migration-browser.git"
@@ -13,7 +16,16 @@
     "vscode": "^1.100.0"
   },
   "categories": [
-    "Other"
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "supabase",
+    "migrations",
+    "rpc",
+    "postgresql",
+    "sql",
+    "database"
   ],
   "main": "./dist/extension.js",
   "contributes": {

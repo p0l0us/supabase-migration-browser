@@ -2,3 +2,29 @@ dist
 node_modules
 .vscode-test
 *.vsix
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+*secret*
+*credential*
+
+# Personal shell/editor/workstation files that should not be committed from repo root
+.bash_profile
+.bashrc
+.gitconfig
+.gitmodules
+.idea
+.mcp.json
+.profile
+.ripgreprc
+.zprofile
+.zshrc
+supabase
+.lh
