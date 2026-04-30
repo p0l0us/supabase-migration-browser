@@ -88,7 +88,8 @@
       "supabaseMigrationsBrowser": [
         {
           "id": "supabaseMigrationsBrowser.view",
-          "name": "Supabase RPC Functions"
+          "name": "Supabase RPC Functions",
+          "type": "webview"
         }
       ]
     },
@@ -108,28 +109,6 @@
           "command": "supabaseMigrationsBrowser.refresh",
           "when": "view == supabaseMigrationsBrowser.view",
           "group": "navigation@3"
-        }
-      ],
-      "view/item/context": [
-        {
-          "command": "supabaseMigrationsBrowser.openMigration",
-          "when": "view == supabaseMigrationsBrowser.view && viewItem =~ /(^| )canDiff( |$)/",
-          "group": "inline@1"
-        },
-        {
-          "command": "supabaseMigrationsBrowser.openSourceMigration",
-          "when": "view == supabaseMigrationsBrowser.view && viewItem =~ /(^| )supabaseMigration( |$)/",
-          "group": "inline@2"
-        },
-        {
-          "command": "supabaseMigrationsBrowser.openPreviousMigration",
-          "when": "view == supabaseMigrationsBrowser.view && viewItem =~ /(^| )hasPrevious( |$)/",
-          "group": "inline@3"
-        },
-        {
-          "command": "supabaseMigrationsBrowser.openRelatedQueries",
-          "when": "view == supabaseMigrationsBrowser.view && viewItem =~ /(^| )hasRelatedQueries( |$)/",
-          "group": "inline@4"
         }
       ]
     }

@@ -3,7 +3,7 @@
     "activeCommit": 0,
     "commits": [
         {
-            "activePatchIndex": 2,
+            "activePatchIndex": 3,
             "patches": [
                 {
                     "date": 1775812636397,
@@ -16,6 +16,10 @@
                 {
                     "date": 1775828046621,
                     "content": "Index: \n===================================================================\n--- \n+++ \n@@ -13,9 +13,9 @@\n - Uses yellow rows for updated RPCs and green rows for newly introduced RPCs while leaving unchanged RPCs with the default styling.\n - Adds its own Activity Bar icon so the RPC browser is visible in the left sidebar.\n - Opens a side-by-side diff between the latest and previous SQL definitions when a comparison version exists and the RPC is not new in the current branch.\n - Opens the latest migration file by default for new RPCs and any RPC without a diffable previous definition.\n-- Shows inline row actions for opening the latest migration file and the previous migration defining the RPC, with diff only when a comparison definition exists.\n+- Shows inline row actions for opening the latest migration file, the previous migration defining the RPC, and a generated related-queries view for non-function SQL in the latest migration, with diff only when a comparison definition exists.\n - Adds a live full-text search action in the view toolbar that filters while you type.\n - Adds a refresh action to reload the list.\n - Shows a clear empty state when the migrations folder is missing or no RPCs are defined.\n \n"
+                },
+                {
+                    "date": 1775850730867,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -14,9 +14,9 @@\n - Adds its own Activity Bar icon so the RPC browser is visible in the left sidebar.\n - Opens a side-by-side diff between the latest and previous SQL definitions when a comparison version exists and the RPC is not new in the current branch.\n - Opens the latest migration file by default for new RPCs and any RPC without a diffable previous definition.\n - Shows inline row actions for opening the latest migration file, the previous migration defining the RPC, and a generated related-queries view for non-function SQL in the latest migration, with diff only when a comparison definition exists.\n-- Adds a live full-text search action in the view toolbar that filters while you type.\n+- Keeps a permanent search field pinned at the top of the sidebar and still lets the toolbar search action focus that field.\n - Adds a refresh action to reload the list.\n - Shows a clear empty state when the migrations folder is missing or no RPCs are defined.\n \n ## Scope\n"
                 }
             ],
             "date": 1775812636397,

@@ -3,7 +3,7 @@
     "activeCommit": 0,
     "commits": [
         {
-            "activePatchIndex": 3,
+            "activePatchIndex": 4,
             "patches": [
                 {
                     "date": 1775772340132,
@@ -20,6 +20,10 @@
                 {
                     "date": 1775828046623,
                     "content": "Index: \n===================================================================\n--- \n+++ \n@@ -1,9 +1,9 @@\n {\n   \"name\": \"browse-supabase-migrations\",\n   \"displayName\": \"Browse Supabase Migrations\",\n   \"description\": \"Read-only VS Code view for Supabase RPC functions defined in supabase/migrations.\",\n-  \"version\": \"0.0.3\",\n+  \"version\": \"0.0.4\",\n   \"private\": true,\n   \"publisher\": \"local\",\n   \"repository\": {\n     \"type\": \"git\",\n@@ -50,8 +50,16 @@\n           \"dark\": \"./media/action-open-previous.svg\"\n         }\n       },\n       {\n+        \"command\": \"supabaseMigrationsBrowser.openRelatedQueries\",\n+        \"title\": \"Open Related Queries\",\n+        \"icon\": {\n+          \"light\": \"./media/action-related-queries.svg\",\n+          \"dark\": \"./media/action-related-queries.svg\"\n+        }\n+      },\n+      {\n         \"command\": \"supabaseMigrationsBrowser.searchRpcs\",\n         \"title\": \"Search RPCs\",\n         \"icon\": {\n           \"light\": \"./media/action-search.svg\",\n@@ -116,8 +124,13 @@\n         {\n           \"command\": \"supabaseMigrationsBrowser.openPreviousMigration\",\n           \"when\": \"view == supabaseMigrationsBrowser.view && viewItem =~ /(^| )hasPrevious( |$)/\",\n           \"group\": \"inline@3\"\n+        },\n+        {\n+          \"command\": \"supabaseMigrationsBrowser.openRelatedQueries\",\n+          \"when\": \"view == supabaseMigrationsBrowser.view && viewItem =~ /(^| )hasRelatedQueries( |$)/\",\n+          \"group\": \"inline@4\"\n         }\n       ]\n     }\n   },\n"
+                },
+                {
+                    "date": 1775850730858,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -87,9 +87,10 @@\n     \"views\": {\n       \"supabaseMigrationsBrowser\": [\n         {\n           \"id\": \"supabaseMigrationsBrowser.view\",\n-          \"name\": \"Supabase RPC Functions\"\n+          \"name\": \"Supabase RPC Functions\",\n+          \"type\": \"webview\"\n         }\n       ]\n     },\n     \"menus\": {\n@@ -108,30 +109,8 @@\n           \"command\": \"supabaseMigrationsBrowser.refresh\",\n           \"when\": \"view == supabaseMigrationsBrowser.view\",\n           \"group\": \"navigation@3\"\n         }\n-      ],\n-      \"view/item/context\": [\n-        {\n-          \"command\": \"supabaseMigrationsBrowser.openMigration\",\n-          \"when\": \"view == supabaseMigrationsBrowser.view && viewItem =~ /(^| )canDiff( |$)/\",\n-          \"group\": \"inline@1\"\n-        },\n-        {\n-          \"command\": \"supabaseMigrationsBrowser.openSourceMigration\",\n-          \"when\": \"view == supabaseMigrationsBrowser.view && viewItem =~ /(^| )supabaseMigration( |$)/\",\n-          \"group\": \"inline@2\"\n-        },\n-        {\n-          \"command\": \"supabaseMigrationsBrowser.openPreviousMigration\",\n-          \"when\": \"view == supabaseMigrationsBrowser.view && viewItem =~ /(^| )hasPrevious( |$)/\",\n-          \"group\": \"inline@3\"\n-        },\n-        {\n-          \"command\": \"supabaseMigrationsBrowser.openRelatedQueries\",\n-          \"when\": \"view == supabaseMigrationsBrowser.view && viewItem =~ /(^| )hasRelatedQueries( |$)/\",\n-          \"group\": \"inline@4\"\n-        }\n       ]\n     }\n   },\n   \"scripts\": {\n"
                 }
             ],
             "date": 1775772340132,

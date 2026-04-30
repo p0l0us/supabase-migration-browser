@@ -15,7 +15,7 @@ This standalone VS Code extension adds a read-only Supabase RPC browser for SQL 
 - Opens a side-by-side diff between the latest and previous SQL definitions when a comparison version exists and the RPC is not new in the current branch.
 - Opens the latest migration file by default for new RPCs and any RPC without a diffable previous definition.
 - Shows inline row actions for opening the latest migration file, the previous migration defining the RPC, and a generated related-queries view for non-function SQL in the latest migration, with diff only when a comparison definition exists.
-- Adds a live full-text search action in the view toolbar that filters while you type.
+- Keeps a permanent search field pinned at the top of the sidebar and still lets the toolbar search action focus that field.
 - Adds a refresh action to reload the list.
 - Shows a clear empty state when the migrations folder is missing or no RPCs are defined.
 
