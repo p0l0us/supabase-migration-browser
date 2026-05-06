@@ -9,10 +9,13 @@ export type MigrationFileDescriptor = {
 
 export type RpcChangeState = 'new' | 'updated';
 export type RpcSourceKind = 'workspace' | 'history';
+export type MigrationObjectKind = 'rpc' | 'view';
+export type MigrationKindFilter = 'all' | 'rpcs' | 'views';
 
 export type MigrationModel = {
   id: string;
   fileName: string;
+  kind: MigrationObjectKind;
   label: string;
   description: string;
   changeState: RpcChangeState | null;
@@ -28,6 +31,7 @@ export type MigrationModel = {
 export type RpcVersionModel = {
   fileName: string;
   fileContent: string;
+  kind: MigrationObjectKind;
   qualifiedName: string;
   sqlDefinition: string;
   startLine: number;
@@ -46,13 +50,23 @@ export type EmptyStateModel = {
 type SqlStatement = {
   sql: string;
   startLine: number;
-  type: 'create-function' | 'other';
+  type: 'object-definition' | 'other';
 };
 
 const TIMESTAMPED_MIGRATION_PATTERN =
   /^(?<timestamp>\d{14})[_-](?<slug>.+)\.sql$/i;
+const QUALIFIED_SQL_IDENTIFIER_PATTERN =
+  '(?:"[^"]+"|[a-z_][a-z0-9_$]*)(?:\\s*\\.\\s*(?:"[^"]+"|[a-z_][a-z0-9_$]*))?';
 const CREATE_FUNCTION_PATTERN =
   /create\s+(?:or\s+replace\s+)?function\s+(?<qualifiedName>(?:"[^"]+"|[a-z_][a-z0-9_$]*)(?:\s*\.\s*(?:"[^"]+"|[a-z_][a-z0-9_$]*))?)\s*\(/gim;
+const CREATE_VIEW_PATTERN = new RegExp(
+  `create\\s+(?:or\\s+replace\\s+)?(?:(?:temporary|temp)\\s+)?(?:materialized\\s+)?(?:recursive\\s+)?view\\s+(?<qualifiedName>${QUALIFIED_SQL_IDENTIFIER_PATTERN})(?:\\s*\\([^;]*?\\))?\\s+as\\b`,
+  'gim',
+);
+const CREATE_OBJECT_PATTERN = new RegExp(
+  `^create\\s+(?:or\\s+replace\\s+)?(?:(?:temporary|temp)\\s+)?(?:(?:materialized|recursive)\\s+)?(?:function|view)\\b`,
+  'i',
+);
 
 type MigrationTimestamp = {
   fileName: string;
@@ -62,6 +76,7 @@ type MigrationTimestamp = {
 type RpcEntry = {
   fileName: string;
   fileContent: string;
+  kind: MigrationObjectKind;
   qualifiedName: string;
   sqlDefinition: string;
   startLine: number;
@@ -94,25 +109,25 @@ export function buildMigrationModels(
   files: MigrationFileDescriptor[],
   baseFiles: MigrationFileDescriptor[] = [],
 ): MigrationModel[] {
-  const rpcEntries = files.flatMap(extractRpcEntries);
-  const rpcVersionsByName = new Map<string, RpcEntry[]>();
-  const baselineVersionsByName = buildLatestRpcVersionIndex(baseFiles);
+  const objectEntries = files.flatMap(extractObjectEntries);
+  const objectVersionsByName = new Map<string, RpcEntry[]>();
+  const baselineVersionsByName = buildLatestObjectVersionIndex(baseFiles);
 
-  for (const rpcEntry of rpcEntries.sort(compareRpcEntriesNewestFirst)) {
-    const normalizedKey = normalizeFunctionName(rpcEntry.qualifiedName);
-    const existingEntries = rpcVersionsByName.get(normalizedKey) ?? [];
+  for (const objectEntry of objectEntries.sort(compareRpcEntriesNewestFirst)) {
+    const normalizedKey = getObjectKey(objectEntry.kind, objectEntry.qualifiedName);
+    const existingEntries = objectVersionsByName.get(normalizedKey) ?? [];
 
-    existingEntries.push(rpcEntry);
-    rpcVersionsByName.set(normalizedKey, existingEntries);
+    existingEntries.push(objectEntry);
+    objectVersionsByName.set(normalizedKey, existingEntries);
   }
 
-  return [...rpcVersionsByName.values()]
-    .map((rpcEntriesForName) => {
-      const latestVersion = toRpcVersionModel(rpcEntriesForName[0]);
-      const normalizedKey = normalizeFunctionName(latestVersion.qualifiedName);
+  return [...objectVersionsByName.values()]
+    .map((objectEntriesForName) => {
+      const latestVersion = toRpcVersionModel(objectEntriesForName[0]);
+      const normalizedKey = getObjectKey(latestVersion.kind, latestVersion.qualifiedName);
       const baselineVersion = baselineVersionsByName.get(normalizedKey) ?? null;
-      const previousVersion = rpcEntriesForName[1]
-        ? toRpcVersionModel(rpcEntriesForName[1])
+      const previousVersion = objectEntriesForName[1]
+        ? toRpcVersionModel(objectEntriesForName[1])
         : null;
       const comparisonVersion = previousVersion ?? baselineVersion;
       const changeState = getRpcChangeState(
@@ -121,8 +136,9 @@ export function buildMigrationModels(
       );
 
       return {
-        id: `${latestVersion.uriString}#${normalizeFunctionName(latestVersion.qualifiedName)}`,
+        id: `${latestVersion.uriString}#${latestVersion.kind}:${normalizeFunctionName(latestVersion.qualifiedName)}`,
         fileName: latestVersion.fileName,
+        kind: latestVersion.kind,
         label: latestVersion.qualifiedName,
         description: latestVersion.timestamp
           ? formatTimestamp(latestVersion.timestamp)
@@ -160,15 +176,21 @@ export function canOpenRpcDiff(
 export function filterMigrationModels(
   models: MigrationModel[],
   query: string,
+  kindFilter: MigrationKindFilter = 'all',
 ): MigrationModel[] {
   const normalizedQuery = query.trim().toLowerCase();
+  const selectedKind = getObjectKindForFilter(kindFilter);
+  const kindFilteredModels = kindFilter === 'all'
+    ? models
+    : models.filter((model) => model.kind === selectedKind);
 
   if (!normalizedQuery) {
-    return models;
+    return kindFilteredModels;
   }
 
-  return models.filter((model) => {
+  return kindFilteredModels.filter((model) => {
     const haystack = [
+      model.kind,
       model.label,
       model.fileName,
       model.workspaceRelativePath,
@@ -221,9 +243,18 @@ export function getLatestMigrationRelatedQueriesContent(
 }
 
 export function getSearchEmptyState(query: string): EmptyStateModel {
+  return getFilteredSearchEmptyState(query, 'all');
+}
+
+export function getFilteredSearchEmptyState(
+  query: string,
+  kindFilter: MigrationKindFilter,
+): EmptyStateModel {
+  const labelNoun = getFilterLabelNoun(kindFilter);
+
   return {
-    label: 'No RPC functions match the search',
-    message: `No Supabase RPC functions matched "${query}".`,
+    label: `No ${labelNoun} match the search`,
+    message: `No Supabase ${labelNoun} matched "${query}".`,
   };
 }
 
@@ -251,8 +282,13 @@ export function normalizeSqlForDiff(sqlDefinition: string): string {
 export function getEmptyState(props: {
   hasMigrationsFolder: boolean;
   hasSqlFiles: boolean;
+  hasFilteredItems?: boolean;
+  kindFilter?: MigrationKindFilter;
 }): EmptyStateModel | null {
-  if (props.hasSqlFiles) {
+  const kindFilter = props.kindFilter ?? 'all';
+  const hasFilteredItems = props.hasFilteredItems ?? props.hasSqlFiles;
+
+  if (hasFilteredItems) {
     return null;
   }
 
@@ -264,16 +300,41 @@ export function getEmptyState(props: {
     };
   }
 
+  if (props.hasSqlFiles && kindFilter !== 'all') {
+    const filterNoun = getFilterLabelNoun(kindFilter);
+
+    return {
+      label: `No Supabase ${filterNoun} found`,
+      message: `No Supabase ${filterNoun} matched the current type filter. Choose All to show every discovered RPC and view.`,
+    };
+  }
+
   return {
-    label: 'No RPC functions found',
+    label: 'No Supabase RPCs or views found',
     message:
-      'The workspace contains supabase/migrations, but no SQL migration currently defines a Supabase RPC function.',
+      'The workspace contains supabase/migrations, but no SQL migration currently defines a Supabase RPC function or view.',
   };
 }
 
 export function extractRpcNames(content: string): string[] {
   const sqlWithoutComments = stripSqlComments(content);
   const matches = sqlWithoutComments.matchAll(CREATE_FUNCTION_PATTERN);
+  const names = new Set<string>();
+
+  for (const match of matches) {
+    const qualifiedName = normalizeFunctionName(match.groups?.qualifiedName);
+
+    if (qualifiedName) {
+      names.add(qualifiedName);
+    }
+  }
+
+  return [...names];
+}
+
+export function extractViewNames(content: string): string[] {
+  const sqlWithoutComments = stripSqlComments(content);
+  const matches = sqlWithoutComments.matchAll(CREATE_VIEW_PATTERN);
   const names = new Set<string>();
 
   for (const match of matches) {
@@ -333,54 +394,64 @@ function compareRpcEntriesNewestFirst(left: RpcEntry, right: RpcEntry): number {
     return right.fileName.localeCompare(left.fileName);
   }
 
-  return left.qualifiedName.localeCompare(right.qualifiedName);
+  const nameComparison = left.qualifiedName.localeCompare(right.qualifiedName);
+
+  if (nameComparison !== 0) {
+    return nameComparison;
+  }
+
+  return left.kind.localeCompare(right.kind);
 }
 
-function buildLatestRpcVersionIndex(
+function buildLatestObjectVersionIndex(
   files: MigrationFileDescriptor[],
 ): Map<string, RpcVersionModel> {
   const latestVersionsByName = new Map<string, RpcVersionModel>();
 
-  for (const rpcEntry of files.flatMap(extractRpcEntries).sort(compareRpcEntriesNewestFirst)) {
-    const normalizedKey = normalizeFunctionName(rpcEntry.qualifiedName);
+  for (const objectEntry of files.flatMap(extractObjectEntries).sort(compareRpcEntriesNewestFirst)) {
+    const normalizedKey = getObjectKey(objectEntry.kind, objectEntry.qualifiedName);
 
     if (!latestVersionsByName.has(normalizedKey)) {
-      latestVersionsByName.set(normalizedKey, toRpcVersionModel(rpcEntry));
+      latestVersionsByName.set(normalizedKey, toRpcVersionModel(objectEntry));
     }
   }
 
   return latestVersionsByName;
 }
 
-function extractRpcEntries(file: MigrationFileDescriptor): RpcEntry[] {
+function extractObjectEntries(file: MigrationFileDescriptor): RpcEntry[] {
   const maskedContent = maskSqlComments(file.content);
   const parsedFileName = parseMigrationFileName(file.fileName);
-  const matches = maskedContent.matchAll(CREATE_FUNCTION_PATTERN);
+  const objectDefinitions = [
+    ...findObjectDefinitions(maskedContent, CREATE_FUNCTION_PATTERN, 'rpc'),
+    ...findObjectDefinitions(maskedContent, CREATE_VIEW_PATTERN, 'view'),
+  ].sort((left, right) => left.index - right.index);
   const entries: RpcEntry[] = [];
   let consumedUntil = 0;
 
-  for (const match of matches) {
-    if (match.index === undefined || match.index < consumedUntil) {
+  for (const objectDefinition of objectDefinitions) {
+    if (objectDefinition.index < consumedUntil) {
       continue;
     }
 
-    const qualifiedName = normalizeFunctionName(match.groups?.qualifiedName);
+    const qualifiedName = normalizeFunctionName(objectDefinition.qualifiedName);
 
     if (!qualifiedName) {
       continue;
     }
 
-    const statementEnd = findSqlStatementEnd(maskedContent, match.index);
-    const sqlDefinition = file.content.slice(match.index, statementEnd).trim();
+    const statementEnd = findSqlStatementEnd(maskedContent, objectDefinition.index);
+    const sqlDefinition = file.content.slice(objectDefinition.index, statementEnd).trim();
 
     consumedUntil = statementEnd;
 
     entries.push({
       fileContent: file.content,
       fileName: file.fileName,
+      kind: objectDefinition.kind,
       qualifiedName,
       sqlDefinition,
-      startLine: getLineNumberAtOffset(file.content, match.index),
+      startLine: getLineNumberAtOffset(file.content, objectDefinition.index),
       sourceKind: file.sourceKind ?? 'workspace',
       timestamp: parsedFileName.timestamp,
       uriString: file.uriString,
@@ -392,13 +463,31 @@ function extractRpcEntries(file: MigrationFileDescriptor): RpcEntry[] {
   return entries;
 }
 
+function findObjectDefinitions(
+  content: string,
+  pattern: RegExp,
+  kind: MigrationObjectKind,
+): Array<{ index: number; kind: MigrationObjectKind; qualifiedName: string | undefined }> {
+  return [...content.matchAll(pattern)].flatMap((match) => {
+    if (match.index === undefined) {
+      return [];
+    }
+
+    return [{
+      index: match.index,
+      kind,
+      qualifiedName: match.groups?.qualifiedName,
+    }];
+  });
+}
+
 function extractRelatedStatements(
   version: Pick<RpcVersionModel, 'fileContent' | 'sqlDefinition'>,
 ): SqlStatement[] {
   const normalizedDefinition = normalizeSqlForDiff(version.sqlDefinition);
 
   return extractSqlStatements(version.fileContent).filter((statement) => {
-    if (statement.type === 'create-function') {
+    if (statement.type === 'object-definition') {
       return false;
     }
 
@@ -433,8 +522,8 @@ function extractSqlStatements(content: string): SqlStatement[] {
     statements.push({
       sql,
       startLine: getLineNumberAtOffset(content, statementStart),
-      type: /^create\s+(?:or\s+replace\s+)?function\b/i.test(sql)
-        ? 'create-function'
+      type: CREATE_OBJECT_PATTERN.test(sql)
+        ? 'object-definition'
         : 'other',
     });
   }
@@ -446,6 +535,7 @@ function toRpcVersionModel(rpcEntry: RpcEntry): RpcVersionModel {
   return {
     fileName: rpcEntry.fileName,
     fileContent: rpcEntry.fileContent,
+    kind: rpcEntry.kind,
     qualifiedName: rpcEntry.qualifiedName,
     sqlDefinition: rpcEntry.sqlDefinition,
     startLine: rpcEntry.startLine,
@@ -455,6 +545,34 @@ function toRpcVersionModel(rpcEntry: RpcEntry): RpcVersionModel {
     workspaceRelativePath: rpcEntry.workspaceRelativePath,
     workspaceFolderName: rpcEntry.workspaceFolderName,
   };
+}
+
+function getObjectKey(kind: MigrationObjectKind, qualifiedName: string): string {
+  return `${kind}:${normalizeFunctionName(qualifiedName)}`;
+}
+
+function getObjectKindForFilter(kindFilter: MigrationKindFilter): MigrationObjectKind | null {
+  if (kindFilter === 'rpcs') {
+    return 'rpc';
+  }
+
+  if (kindFilter === 'views') {
+    return 'view';
+  }
+
+  return null;
+}
+
+function getFilterLabelNoun(kindFilter: MigrationKindFilter): string {
+  if (kindFilter === 'rpcs') {
+    return 'RPC functions';
+  }
+
+  if (kindFilter === 'views') {
+    return 'views';
+  }
+
+  return 'RPC functions or views';
 }
 
 function getRpcChangeState(

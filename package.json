@@ -1,8 +1,8 @@
 {
   "name": "browse-supabase-migrations",
   "displayName": "Browse Supabase Migrations",
-  "description": "Read-only VS Code view for Supabase RPC functions defined in supabase/migrations. Later I'm planning to add features like browsing table definitions, triggers, and more. The extension will be extended as I use it myself, so if you have any feature requests or want to contribute, please let me know!",
-  "version": "0.0.6",
+  "description": "Read-only VS Code view for Supabase RPC functions and views defined in supabase/migrations. Later I'm planning to add features like browsing table definitions, triggers, and more. The extension will be extended as I use it myself, so if you have any feature requests or want to contribute, please let me know!",
+  "version": "0.0.7",
   "private": true,
   "publisher": "p0l0us",
   "author": "Martin Polehla <polehla@gmail.com>",
@@ -10,7 +10,7 @@
   "icon": "media/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/p0l0us/suabase-migration-browser.git"
+    "url": "https://github.com/p0l0us/supabase-migration-browser.git"
   },
   "engines": {
     "vscode": "^1.100.0"
@@ -32,7 +32,7 @@
     "commands": [
       {
         "command": "supabaseMigrationsBrowser.refresh",
-        "title": "Refresh Supabase RPCs",
+        "title": "Refresh Supabase Objects",
         "icon": {
           "light": "./media/action-refresh.svg",
           "dark": "./media/action-refresh.svg"
@@ -40,7 +40,7 @@
       },
       {
         "command": "supabaseMigrationsBrowser.openMigration",
-        "title": "Diff Latest Supabase RPC Versions",
+        "title": "Diff Latest Supabase Object Versions",
         "icon": {
           "light": "./media/action-diff.svg",
           "dark": "./media/action-diff.svg"
@@ -72,7 +72,7 @@
       },
       {
         "command": "supabaseMigrationsBrowser.searchRpcs",
-        "title": "Search RPCs",
+        "title": "Search Supabase Objects",
         "icon": {
           "light": "./media/action-search.svg",
           "dark": "./media/action-search.svg"
@@ -80,7 +80,7 @@
       },
       {
         "command": "supabaseMigrationsBrowser.clearSearch",
-        "title": "Clear RPC Search",
+        "title": "Clear Supabase Object Search",
         "icon": {
           "light": "./media/action-clear.svg",
           "dark": "./media/action-clear.svg"
@@ -91,7 +91,7 @@
       "activitybar": [
         {
           "id": "supabaseMigrationsBrowser",
-          "title": "Supabase RPCs",
+          "title": "Supabase Objects",
           "icon": "./media/migrations.svg"
         }
       ]
@@ -100,7 +100,7 @@
       "supabaseMigrationsBrowser": [
         {
           "id": "supabaseMigrationsBrowser.view",
-          "name": "Supabase RPC Functions",
+          "name": "Supabase RPCs & Views",
           "icon": "./media/migrations.svg",
           "type": "webview"
         }

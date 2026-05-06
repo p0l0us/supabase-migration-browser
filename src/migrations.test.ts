@@ -4,7 +4,9 @@ import {
   buildMigrationModels,
   canOpenRpcDiff,
   extractRpcNames,
+  extractViewNames,
   filterMigrationModels,
+  getFilteredSearchEmptyState,
   getLatestMigrationRelatedQueriesContent,
   getEmptyState,
   getSearchEmptyState,
@@ -100,6 +102,35 @@ describe('extractRpcNames', () => {
   });
 });
 
+describe('extractViewNames', () => {
+  it('extracts regular and quoted view names', () => {
+    const content = `
+      create or replace view public.active_users as
+      select id from public.users where active = true;
+
+      create view analytics."DailyTotals" (day, total) as
+      select now()::date, count(*) from public.orders;
+    `;
+
+    expect(extractViewNames(content)).toEqual([
+      'public.active_users',
+      'analytics."DailyTotals"',
+    ]);
+  });
+
+  it('ignores commented out view declarations', () => {
+    const content = `
+      -- create or replace view public.commented_view as select 1;
+
+      /* create or replace view public.blocked_view as select 1; */
+
+      create or replace view public.real_view as select 1;
+    `;
+
+    expect(extractViewNames(content)).toEqual(['public.real_view']);
+  });
+});
+
 describe('buildMigrationModels', () => {
   it('keeps each rpc only once using the latest migration timestamp', () => {
     const models = buildMigrationModels([
@@ -182,6 +213,43 @@ $$;`,
 
     expect(models[0]?.latestVersion.sqlDefinition).toContain('perform 2;');
     expect(models[0]?.previousVersion?.sqlDefinition).toContain('perform 1;');
+  });
+
+  it('builds view models from create view statements', () => {
+    const models = buildMigrationModels([
+      createMigrationFileDescriptor(
+        '20260408120000_create_dashboard_view.sql',
+        `create or replace view public.dashboard_summary as select 1 as total;`,
+      ),
+      createMigrationFileDescriptor(
+        '20260409120000_update_dashboard_view.sql',
+        `create or replace view public.dashboard_summary as select 2 as total;`,
+      ),
+    ]);
+
+    expect(models[0]).toMatchObject({
+      kind: 'view',
+      label: 'public.dashboard_summary',
+      fileName: '20260409120000_update_dashboard_view.sql',
+    });
+    expect(models[0]?.latestVersion.kind).toBe('view');
+    expect(models[0]?.latestVersion.sqlDefinition).toContain('select 2 as total');
+    expect(models[0]?.previousVersion?.sqlDefinition).toContain('select 1 as total');
+  });
+
+  it('keeps rpc and view entries separate when names overlap', () => {
+    const models = buildMigrationModels([
+      createMigrationFileDescriptor(
+        '20260409120000_create_overlapping_objects.sql',
+        `create or replace function public.shared_name() returns int language sql as $$ select 1; $$;
+         create or replace view public.shared_name as select 1 as id;`,
+      ),
+    ]);
+
+    expect(models.map((model) => [model.kind, model.label])).toEqual([
+      ['rpc', 'public.shared_name'],
+      ['view', 'public.shared_name'],
+    ]);
   });
 
   it('marks rpc entries as new when they do not exist at the branch base', () => {
@@ -406,6 +474,30 @@ describe('filterMigrationModels', () => {
       'public.get_user_dashboard_mining_summary',
     ]);
   });
+
+  it('filters by object kind when a type filter is selected', () => {
+    const models = buildMigrationModels([
+      createMigrationFileDescriptor(
+        '20260409120000_wallet_rpc.sql',
+        `create or replace function public.process_wallet_exchange() returns void language sql as $$ select 'wallet'; $$;`,
+      ),
+      createMigrationFileDescriptor(
+        '20260409130000_wallet_view.sql',
+        `create or replace view public.wallet_summary as select 'wallet' as label;`,
+      ),
+    ]);
+
+    expect(filterMigrationModels(models, '', 'rpcs').map((model) => model.kind)).toEqual([
+      'rpc',
+    ]);
+    expect(filterMigrationModels(models, '', 'views').map((model) => model.kind)).toEqual([
+      'view',
+    ]);
+    expect(filterMigrationModels(models, 'wallet', 'all').map((model) => model.kind)).toEqual([
+      'rpc',
+      'view',
+    ]);
+  });
 });
 
 describe('normalizeSqlForDiff', () => {
@@ -439,8 +531,15 @@ describe('normalizeSqlForDiff', () => {
 describe('getSearchEmptyState', () => {
   it('returns a dedicated empty state for searches', () => {
     expect(getSearchEmptyState('wallet')).toEqual({
-      label: 'No RPC functions match the search',
-      message: 'No Supabase RPC functions matched "wallet".',
+      label: 'No RPC functions or views match the search',
+      message: 'No Supabase RPC functions or views matched "wallet".',
+    });
+  });
+
+  it('returns a type-aware empty state for filtered searches', () => {
+    expect(getFilteredSearchEmptyState('wallet', 'views')).toEqual({
+      label: 'No views match the search',
+      message: 'No Supabase views matched "wallet".',
     });
   });
 });
@@ -466,9 +565,24 @@ describe('getEmptyState', () => {
         hasSqlFiles: false,
       }),
     ).toEqual({
-      label: 'No RPC functions found',
+      label: 'No Supabase RPCs or views found',
       message:
-        'The workspace contains supabase/migrations, but no SQL migration currently defines a Supabase RPC function.',
+        'The workspace contains supabase/migrations, but no SQL migration currently defines a Supabase RPC function or view.',
+    });
+  });
+
+  it('returns a type-filter empty state when objects exist but the selected type does not', () => {
+    expect(
+      getEmptyState({
+        hasMigrationsFolder: true,
+        hasSqlFiles: true,
+        hasFilteredItems: false,
+        kindFilter: 'views',
+      }),
+    ).toEqual({
+      label: 'No Supabase views found',
+      message:
+        'No Supabase views matched the current type filter. Choose All to show every discovered RPC and view.',
     });
   });
 

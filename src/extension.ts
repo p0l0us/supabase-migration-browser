@@ -7,7 +7,9 @@ import {
   hasLatestMigrationRelatedQueries,
   normalizeSqlForDiff,
   type EmptyStateModel,
+  type MigrationKindFilter,
   type MigrationModel,
+  type MigrationObjectKind,
   type RpcVersionModel,
 } from './migrations';
 import { SupabaseMigrationsProvider, type ProviderState } from './provider';
@@ -97,7 +99,7 @@ async function openSourceMigration(
   try {
     await openRpcVersion(model.latestVersion, contentProvider);
   } catch {
-    void vscode.window.showErrorMessage('Failed to open the latest migration file for the selected RPC.');
+    void vscode.window.showErrorMessage('Failed to open the latest migration file for the selected Supabase object.');
   }
 }
 
@@ -112,7 +114,7 @@ async function openPreviousMigration(
   try {
     await openRpcVersion(model.comparisonVersion, contentProvider);
   } catch {
-    void vscode.window.showErrorMessage('Failed to open the previous migration file for the selected RPC.');
+    void vscode.window.showErrorMessage('Failed to open the previous migration file for the selected Supabase object.');
   }
 }
 
@@ -137,7 +139,7 @@ async function openRelatedQueries(
       preserveFocus: false,
     });
   } catch {
-    void vscode.window.showErrorMessage('Failed to open related queries for the selected RPC.');
+    void vscode.window.showErrorMessage('Failed to open related queries for the selected Supabase object.');
   }
 }
 
@@ -181,7 +183,7 @@ async function openMigrationDiff(
       },
     );
   } catch {
-    void vscode.window.showErrorMessage('Failed to open the RPC diff view.');
+    void vscode.window.showErrorMessage('Failed to open the Supabase object diff view.');
   }
 }
 
@@ -258,6 +260,11 @@ class SupabaseMigrationsViewProvider
       return;
     }
 
+    if (typedMessage.type === 'filter' && isMigrationKindFilter(typedMessage.value)) {
+      await this.provider.setKindFilter(typedMessage.value);
+      return;
+    }
+
     if (
       typedMessage.type === 'action' &&
       typeof typedMessage.action === 'string' &&
@@ -303,7 +310,11 @@ class SupabaseMigrationsViewProvider
 
     await this.view.webview.postMessage({
       type: 'state',
-      payload: buildWebviewState(state, this.provider.getSearchQuery()),
+      payload: buildWebviewState(
+        state,
+        this.provider.getSearchQuery(),
+        this.provider.getKindFilter(),
+      ),
     });
     await this.postFocusSearch();
   }
@@ -368,8 +379,9 @@ class RpcDiffContentProvider implements vscode.TextDocumentContentProvider {
 }
 
 function formatRpcVersion(version: RpcVersionModel): string {
+  const objectLabel = getObjectKindLabel(version.kind);
   const headerLines = [
-    `-- RPC: ${version.qualifiedName}`,
+    `-- ${objectLabel}: ${version.qualifiedName}`,
     `-- Migration: ${version.fileName}`,
     `-- Timestamp: ${version.timestamp ?? version.fileName}`,
     `-- Source: ${version.workspaceRelativePath}`,
@@ -390,6 +402,14 @@ function buildDiffTitle(
   return `${rpcName}: ${previousLabel} ↔ ${latestLabel}`;
 }
 
+function isMigrationKindFilter(value: unknown): value is MigrationKindFilter {
+  return value === 'all' || value === 'rpcs' || value === 'views';
+}
+
+function getObjectKindLabel(kind: MigrationObjectKind): string {
+  return kind === 'view' ? 'View' : 'RPC';
+}
+
 type WebviewMigrationItem = {
   canDiff: boolean;
   changeState: 'new' | 'updated' | 'unchanged';
@@ -397,6 +417,7 @@ type WebviewMigrationItem = {
   hasPrevious: boolean;
   hasRelatedQueries: boolean;
   id: string;
+  kind: MigrationObjectKind;
   label: string;
   path: string;
   primaryAction: 'diff' | 'latest';
@@ -405,12 +426,14 @@ type WebviewMigrationItem = {
 type WebviewState = {
   emptyState: EmptyStateModel | null;
   items: WebviewMigrationItem[];
+  kindFilter: MigrationKindFilter;
   searchQuery: string;
 };
 
 function buildWebviewState(
   state: ProviderState,
   searchQuery: string,
+  kindFilter: MigrationKindFilter,
 ): WebviewState {
   return {
     emptyState: state.emptyState,
@@ -424,11 +447,13 @@ function buildWebviewState(
         hasPrevious: hasComparisonMigration(model),
         hasRelatedQueries: hasLatestMigrationRelatedQueries(model.latestVersion),
         id: model.id,
+        kind: model.kind,
         label: model.label,
         path: model.workspaceRelativePath,
         primaryAction: canDiff ? 'diff' : 'latest',
       };
     }),
+    kindFilter,
     searchQuery,
   };
 }
@@ -522,7 +547,7 @@ function getWebviewHtml(): string {
 
     .search-row {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-columns: minmax(0, 1fr) auto auto;
       gap: 8px;
       align-items: center;
       min-width: 0;
@@ -565,6 +590,81 @@ function getWebviewHtml(): string {
     .toolbar-button:disabled {
       cursor: default;
       opacity: 0.6;
+    }
+
+    .toolbar-button.active {
+      border-color: var(--vscode-focusBorder);
+      background: color-mix(in srgb, var(--vscode-button-background) 28%, var(--vscode-button-secondaryBackground));
+      color: var(--vscode-button-foreground);
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-focusBorder) 60%, transparent);
+    }
+
+    .icon-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      padding: 0;
+    }
+
+    .icon-button svg {
+      width: 15px;
+      height: 15px;
+      fill: currentColor;
+    }
+
+    .filter-menu-shell {
+      position: relative;
+    }
+
+    .filter-menu {
+      position: absolute;
+      top: calc(100% + 6px);
+      right: 0;
+      z-index: 3;
+      min-width: 154px;
+      padding: 4px;
+      border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border));
+      border-radius: 8px;
+      background: var(--vscode-dropdown-background, var(--vscode-menu-background));
+      color: var(--vscode-dropdown-foreground, var(--vscode-menu-foreground));
+      box-shadow: 0 8px 24px color-mix(in srgb, #000 22%, transparent);
+    }
+
+    .filter-menu[hidden] {
+      display: none;
+    }
+
+    .filter-menu button {
+      display: flex;
+      width: 100%;
+      align-items: center;
+      justify-content: space-between;
+      padding: 7px 8px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .filter-menu button:hover,
+    .filter-menu button:focus {
+      background: var(--vscode-list-hoverBackground);
+      outline: none;
+    }
+
+    .filter-menu button[aria-checked="true"] {
+      color: var(--vscode-list-highlightForeground, var(--vscode-button-foreground));
+      font-weight: 600;
+    }
+
+    .filter-menu button[aria-checked="true"]::after {
+      content: '✓';
+      margin-left: 12px;
     }
 
     .summary {
@@ -671,6 +771,21 @@ function getWebviewHtml(): string {
       color: var(--vscode-charts-yellow);
     }
 
+    .object-kind {
+      display: inline-flex;
+      align-items: center;
+      height: 18px;
+      margin-right: 6px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--vscode-badge-background) 16%, transparent);
+      color: var(--vscode-descriptionForeground);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
     .empty-state {
       padding: 14px;
     }
@@ -698,12 +813,32 @@ function getWebviewHtml(): string {
           class="search-input"
           type="search"
           spellcheck="false"
-          placeholder="Search RPC names, migration paths, SQL, or related queries"
-          aria-label="Search Supabase RPCs"
+          placeholder="Search RPC/view names, migration paths, SQL, or related queries"
+          aria-label="Search Supabase RPCs and views"
         >
         <button id="clear-button" class="toolbar-button" type="button">Clear</button>
+        <div class="filter-menu-shell">
+          <button
+            id="filter-button"
+            class="toolbar-button icon-button"
+            type="button"
+            title="Filter Supabase objects"
+            aria-label="Filter Supabase objects"
+            aria-haspopup="true"
+            aria-expanded="false"
+          >
+            <svg aria-hidden="true" viewBox="0 0 16 16" focusable="false">
+              <path d="M1.5 3.25A1.25 1.25 0 0 1 2.75 2h10.5a1.25 1.25 0 0 1 .98 2.03L10 9.32v3.43a.75.75 0 0 1-.35.63l-2 1.25A.75.75 0 0 1 6.5 14V9.32L1.52 4.03a1.25 1.25 0 0 1-.02-.78Zm1.28.25 4.99 5.3a.75.75 0 0 1 .2.52v3.33l.53-.33v-3a.75.75 0 0 1 .2-.52l4.23-5.3H2.78Z" />
+            </svg>
+          </button>
+          <div id="filter-menu" class="filter-menu" role="menu" hidden>
+            <button type="button" role="menuitemradio" data-filter="all" aria-checked="true">All</button>
+            <button type="button" role="menuitemradio" data-filter="rpcs" aria-checked="false">RPCs</button>
+            <button type="button" role="menuitemradio" data-filter="views" aria-checked="false">Views</button>
+          </div>
+        </div>
       </div>
-      <div id="summary" class="summary">Loading Supabase RPCs...</div>
+      <div id="summary" class="summary">Loading Supabase objects...</div>
     </header>
     <main id="content" class="content"></main>
   </div>
@@ -712,11 +847,14 @@ function getWebviewHtml(): string {
     const vscode = acquireVsCodeApi();
     const searchInput = document.getElementById('search-input');
     const clearButton = document.getElementById('clear-button');
+    const filterButton = document.getElementById('filter-button');
+    const filterMenu = document.getElementById('filter-menu');
     const summary = document.getElementById('summary');
     const content = document.getElementById('content');
     const state = {
       emptyState: null,
       items: [],
+      kindFilter: 'all',
       searchQuery: '',
     };
     let searchTimer = undefined;
@@ -771,12 +909,55 @@ function getWebviewHtml(): string {
       searchInput.focus();
     });
 
+    filterButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      setFilterMenuOpen(filterMenu.hidden);
+    });
+
+    filterMenu.addEventListener('click', (event) => {
+      if (!(event.target instanceof Element)) {
+        return;
+      }
+
+      const menuItem = event.target.closest('[data-filter]');
+
+      if (!menuItem) {
+        return;
+      }
+
+      const value = menuItem.getAttribute('data-filter');
+
+      if (!isKindFilter(value)) {
+        return;
+      }
+
+      state.kindFilter = value;
+      syncFilterButton();
+      renderSummary();
+      setFilterMenuOpen(false);
+      vscode.postMessage({
+        type: 'filter',
+        value,
+      });
+    });
+
+    document.addEventListener('click', () => {
+      setFilterMenuOpen(false);
+    });
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        setFilterMenuOpen(false);
+      }
+    });
+
     window.addEventListener('message', (event) => {
       const message = event.data;
 
       if (message.type === 'state') {
         state.emptyState = message.payload.emptyState;
         state.items = message.payload.items;
+        state.kindFilter = message.payload.kindFilter;
         state.searchQuery = message.payload.searchQuery;
 
         if (searchInput.value !== state.searchQuery) {
@@ -784,6 +965,7 @@ function getWebviewHtml(): string {
         }
 
         syncClearButton();
+  syncFilterButton();
         render();
         return;
       }
@@ -798,19 +980,45 @@ function getWebviewHtml(): string {
       clearButton.disabled = searchInput.value.length === 0;
     }
 
+    function syncFilterButton() {
+      const isActive = state.kindFilter !== 'all';
+
+      filterButton.classList.toggle('active', isActive);
+      filterButton.setAttribute('aria-expanded', String(!filterMenu.hidden));
+      filterButton.title = isActive
+        ? 'Filtering by ' + getKindFilterLabel(state.kindFilter)
+        : 'Filter Supabase objects';
+
+      for (const menuItem of filterMenu.querySelectorAll('[data-filter]')) {
+        menuItem.setAttribute(
+          'aria-checked',
+          String(menuItem.getAttribute('data-filter') === state.kindFilter),
+        );
+      }
+    }
+
+    function setFilterMenuOpen(isOpen) {
+      filterMenu.hidden = !isOpen;
+      syncFilterButton();
+    }
+
     function renderSummary() {
       const query = state.searchQuery.trim();
+      const noun = getCountNoun(state.kindFilter, state.items.length);
+      const filterSuffix = state.kindFilter === 'all'
+        ? ''
+        : ' · ' + getKindFilterLabel(state.kindFilter) + ' filter';
 
       if (query) {
         summary.textContent = state.items.length === 1
-          ? '1 match for "' + query + '"'
-          : String(state.items.length) + ' matches for "' + query + '"';
+          ? '1 ' + noun + ' match for "' + query + '"' + filterSuffix
+          : String(state.items.length) + ' ' + noun + ' match for "' + query + '"' + filterSuffix;
         return;
       }
 
       summary.textContent = state.items.length === 1
-        ? '1 RPC function'
-        : String(state.items.length) + ' RPC functions';
+        ? '1 ' + noun + filterSuffix
+        : String(state.items.length) + ' ' + noun + filterSuffix;
     }
 
     function render() {
@@ -856,7 +1064,7 @@ function getWebviewHtml(): string {
       return [
         '<article class="rpc-card ' + item.changeState + '">',
         '  <header class="rpc-header">',
-        '    <h2 class="rpc-title">' + escapeHtml(item.label) + '</h2>',
+        '    <h2 class="rpc-title"><span class="object-kind">' + escapeHtml(getObjectKindLabel(item.kind)) + '</span>' + escapeHtml(item.label) + '</h2>',
         '    ' + badge,
         '  </header>',
         '  <div class="rpc-meta">' + escapeHtml(item.description) + '</div>',
@@ -875,7 +1083,40 @@ function getWebviewHtml(): string {
         .replace(/'/g, '&#39;');
     }
 
+    function isKindFilter(value) {
+      return value === 'all' || value === 'rpcs' || value === 'views';
+    }
+
+    function getKindFilterLabel(kindFilter) {
+      if (kindFilter === 'rpcs') {
+        return 'RPCs';
+      }
+
+      if (kindFilter === 'views') {
+        return 'Views';
+      }
+
+      return 'All';
+    }
+
+    function getObjectKindLabel(kind) {
+      return kind === 'view' ? 'View' : 'RPC';
+    }
+
+    function getCountNoun(kindFilter, count) {
+      if (kindFilter === 'rpcs') {
+        return count === 1 ? 'RPC function' : 'RPC functions';
+      }
+
+      if (kindFilter === 'views') {
+        return count === 1 ? 'view' : 'views';
+      }
+
+      return count === 1 ? 'Supabase object' : 'Supabase objects';
+    }
+
     syncClearButton();
+    syncFilterButton();
     render();
     vscode.postMessage({ type: 'ready' });
   </script>

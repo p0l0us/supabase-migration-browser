@@ -8,8 +8,9 @@ import {
   buildMigrationModels,
   filterMigrationModels,
   getEmptyState,
-  getSearchEmptyState,
+  getFilteredSearchEmptyState,
   type EmptyStateModel,
+  type MigrationKindFilter,
   type MigrationFileDescriptor,
   type MigrationModel,
 } from './migrations';
@@ -26,6 +27,7 @@ export class SupabaseMigrationsProvider
   private readonly stateEmitter = new vscode.EventEmitter<ProviderState>();
   private readonly watcher: vscode.FileSystemWatcher;
   private cachedState?: ProviderState;
+  private kindFilter: MigrationKindFilter = 'all';
   private searchQuery = '';
   private stateRequestId = 0;
 
@@ -58,6 +60,15 @@ export class SupabaseMigrationsProvider
   async setSearchQuery(searchQuery: string): Promise<void> {
     this.searchQuery = searchQuery;
     await this.loadState(true, true);
+  }
+
+  async setKindFilter(kindFilter: MigrationKindFilter): Promise<void> {
+    this.kindFilter = kindFilter;
+    await this.loadState(true, true);
+  }
+
+  getKindFilter(): MigrationKindFilter {
+    return this.kindFilter;
   }
 
   getSearchQuery(): string {
@@ -140,15 +151,17 @@ export class SupabaseMigrationsProvider
     }
 
     const items = buildMigrationModels(files, baseFiles);
-    const filteredItems = filterMigrationModels(items, this.searchQuery);
+    const filteredItems = filterMigrationModels(items, this.searchQuery, this.kindFilter);
 
     const emptyState = this.searchQuery.trim()
       ? filteredItems.length === 0
-        ? getSearchEmptyState(this.searchQuery.trim())
+        ? getFilteredSearchEmptyState(this.searchQuery.trim(), this.kindFilter)
         : null
       : getEmptyState({
         hasMigrationsFolder,
         hasSqlFiles: items.length > 0,
+        hasFilteredItems: filteredItems.length > 0,
+        kindFilter: this.kindFilter,
       });
 
     return {
