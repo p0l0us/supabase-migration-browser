@@ -150,6 +150,7 @@ export function deactivate(): void { }
 async function openMigrationDiff(
   model: MigrationModel | undefined,
   contentProvider: RpcDiffContentProvider,
+  comparisonVersionOverride?: RpcVersionModel,
 ): Promise<void> {
   if (!model) {
     return;
@@ -157,7 +158,7 @@ async function openMigrationDiff(
 
   try {
     const latestVersion = model.latestVersion;
-    const previousVersion = model.comparisonVersion;
+    const previousVersion = comparisonVersionOverride ?? model.comparisonVersion;
 
     if (!previousVersion) {
       await openSourceMigration(model, contentProvider);
@@ -310,6 +311,15 @@ class SupabaseMigrationsViewProvider
 
       if (typedMessage.action === 'diff') {
         await openMigrationDiff(model, this.contentProvider);
+        return;
+      }
+
+      if (typedMessage.action === 'diffTarget' && typeof typedMessage.value === 'string') {
+        await openMigrationDiff(
+          model,
+          this.contentProvider,
+          findComparisonVersionByKey(model, typedMessage.value),
+        );
         return;
       }
 
@@ -556,6 +566,7 @@ function getObjectKindLabel(kind: MigrationObjectKind): string {
 type WebviewMigrationItem = {
   canDiff: boolean;
   changeState: 'new' | 'updated' | 'unchanged';
+  comparisonTargets: WebviewComparisonTarget[];
   description: string;
   hasPrevious: boolean;
   hasRelatedQueries: boolean;
@@ -564,6 +575,12 @@ type WebviewMigrationItem = {
   label: string;
   path: string;
   primaryAction: 'diff' | 'latest';
+};
+
+type WebviewComparisonTarget = {
+  description: string;
+  key: string;
+  label: string;
 };
 
 type WebviewState = {
@@ -598,6 +615,7 @@ function buildWebviewState(
       return {
         canDiff,
         changeState: model.changeState ?? 'unchanged',
+        comparisonTargets: buildComparisonTargets(model),
         description: buildItemDescription(model, state.includeWorkspaceName),
         hasPrevious: hasComparisonMigration(model),
         hasRelatedQueries: hasMigrationRelatedQueriesContent(model),
@@ -613,6 +631,83 @@ function buildWebviewState(
     selectedComparisonBranch: state.selectedComparisonBranch,
     showOnlyChanged,
   };
+}
+
+function buildComparisonTargets(model: MigrationModel): WebviewComparisonTarget[] {
+  const targetVersions = [
+    model.comparisonVersion,
+    ...model.allVersions.slice(1),
+  ];
+  const targets: WebviewComparisonTarget[] = [];
+  const seenKeys = new Set<string>();
+
+  for (const targetVersion of targetVersions) {
+    if (!targetVersion) {
+      continue;
+    }
+
+    const key = getVersionKey(targetVersion);
+
+    if (seenKeys.has(key)) {
+      continue;
+    }
+
+    seenKeys.add(key);
+    targets.push({
+      description: targetVersion.workspaceRelativePath,
+      key,
+      label: formatComparisonTargetLabel(targetVersion, targets.length === 0),
+    });
+  }
+
+  return targets;
+}
+
+function findComparisonVersionByKey(
+  model: MigrationModel,
+  versionKey: string,
+): RpcVersionModel | undefined {
+  const targetVersions = [
+    model.comparisonVersion,
+    ...model.allVersions.slice(1),
+  ];
+
+  return targetVersions.find((targetVersion): targetVersion is RpcVersionModel => (
+    Boolean(targetVersion) && getVersionKey(targetVersion as RpcVersionModel) === versionKey
+  ));
+}
+
+function getVersionKey(version: RpcVersionModel): string {
+  return [
+    version.sourceKind,
+    version.workspaceRelativePath,
+    version.startLine,
+    version.timestamp ?? '',
+    version.fileName,
+  ].join('|');
+}
+
+function formatComparisonTargetLabel(
+  version: RpcVersionModel,
+  isDefaultTarget: boolean,
+): string {
+  const sourceLabel = version.sourceKind === 'history'
+    ? 'Target branch'
+    : 'Workspace migration';
+  const versionLabel = version.timestamp
+    ? formatTimestampLabel(version.timestamp)
+    : version.fileName;
+  const defaultPrefix = isDefaultTarget ? 'Default · ' : '';
+
+  return `${defaultPrefix}${sourceLabel} · ${versionLabel}`;
+}
+
+function formatTimestampLabel(timestamp: string): string {
+  if (!/^\d{14}$/.test(timestamp)) {
+    return timestamp;
+  }
+
+  return `${timestamp.slice(0, 4)}-${timestamp.slice(4, 6)}-${timestamp.slice(6, 8)} ${timestamp.slice(8, 10)}:${timestamp.slice(10, 12)}:${timestamp.slice(12, 14)}`;
 }
 
 function buildItemDescription(
@@ -906,6 +1001,10 @@ function getWebviewHtml(): string {
       overflow: hidden;
     }
 
+    .rpc-card {
+      overflow: visible;
+    }
+
     .rpc-card.new {
       border-color: color-mix(in srgb, var(--vscode-charts-green) 50%, var(--vscode-sideBar-border, transparent));
     }
@@ -956,6 +1055,13 @@ function getWebviewHtml(): string {
       min-width: 0;
     }
 
+    .diff-action-group {
+      position: relative;
+      display: inline-flex;
+      gap: 4px;
+      align-items: stretch;
+    }
+
     .action-button {
       min-height: 26px;
       padding: 6px 10px;
@@ -965,6 +1071,62 @@ function getWebviewHtml(): string {
     .action-button.primary {
       background: var(--vscode-button-background);
       color: var(--vscode-button-foreground);
+    }
+
+    .action-button.menu-toggle {
+      min-width: 30px;
+      padding-inline: 8px;
+      font-weight: 700;
+    }
+
+    .comparison-menu {
+      position: absolute;
+      left: 0;
+      bottom: calc(100% + 6px);
+      z-index: 4;
+      width: min(320px, calc(100vw - 32px));
+      max-height: 240px;
+      overflow: auto;
+      padding: 4px;
+      border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border));
+      border-radius: 8px;
+      background: var(--vscode-dropdown-background, var(--vscode-menu-background));
+      color: var(--vscode-dropdown-foreground, var(--vscode-menu-foreground));
+      box-shadow: 0 8px 24px color-mix(in srgb, #000 22%, transparent);
+    }
+
+    .comparison-menu[hidden] {
+      display: none;
+    }
+
+    .comparison-menu button {
+      display: grid;
+      width: 100%;
+      gap: 2px;
+      padding: 7px 8px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .comparison-menu button:hover,
+    .comparison-menu button:focus {
+      background: var(--vscode-list-hoverBackground);
+      outline: none;
+    }
+
+    .comparison-target-label {
+      font-weight: 600;
+    }
+
+    .comparison-target-path {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      word-break: break-all;
     }
 
     .badge {
@@ -1104,6 +1266,14 @@ function getWebviewHtml(): string {
         return;
       }
 
+      const menuToggle = event.target.closest('[data-comparison-toggle]');
+
+      if (menuToggle) {
+        event.stopPropagation();
+        toggleComparisonMenu(menuToggle.getAttribute('data-comparison-toggle'));
+        return;
+      }
+
       const actionTarget = event.target.closest('[data-action]');
 
       if (!actionTarget) {
@@ -1112,15 +1282,19 @@ function getWebviewHtml(): string {
 
       const action = actionTarget.getAttribute('data-action');
       const id = actionTarget.getAttribute('data-id');
+      const value = actionTarget.getAttribute('data-value');
 
       if (!action || !id) {
         return;
       }
 
+      closeComparisonMenus();
+
       vscode.postMessage({
         type: 'action',
         action,
         id,
+        value,
       });
     });
 
@@ -1217,11 +1391,13 @@ function getWebviewHtml(): string {
 
     document.addEventListener('click', () => {
       setFilterMenuOpen(false);
+      closeComparisonMenus();
     });
 
     document.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
         setFilterMenuOpen(false);
+        closeComparisonMenus();
       }
     });
 
@@ -1344,6 +1520,29 @@ function getWebviewHtml(): string {
       branchSelect.disabled = !state.detectGitChanges || state.comparisonBranches.length === 0;
     }
 
+    function toggleComparisonMenu(menuId) {
+      if (!menuId) {
+        return;
+      }
+
+      const menu = document.getElementById(menuId);
+
+      if (!menu) {
+        return;
+      }
+
+      const shouldOpen = menu.hidden;
+
+      closeComparisonMenus();
+      menu.hidden = !shouldOpen;
+    }
+
+    function closeComparisonMenus() {
+      for (const menu of document.querySelectorAll('[data-comparison-menu]')) {
+        menu.hidden = true;
+      }
+    }
+
     function render() {
       renderSummary();
 
@@ -1365,12 +1564,24 @@ function getWebviewHtml(): string {
         ? ''
         : '<span class="badge ' + item.changeState + '">' + escapeHtml(item.changeState) + '</span>';
       const actions = [];
+      const comparisonMenuId = 'comparison-menu-' + hashValue(item.id);
+      const comparisonMenu = renderComparisonMenu(item, comparisonMenuId);
 
-      actions.push(
-        '<button class="action-button primary" type="button" data-action="' + escapeHtml(item.primaryAction) + '" data-id="' + escapeHtml(item.id) + '">' +
-          (item.primaryAction === 'diff' ? 'Diff' : 'Open latest') +
-        '</button>',
-      );
+      if (item.primaryAction === 'diff') {
+        actions.push([
+          '<span class="diff-action-group">',
+          '  <button class="action-button primary" type="button" data-action="diff" data-id="' + escapeHtml(item.id) + '">Diff</button>',
+          comparisonMenu
+            ? '  <button class="action-button primary menu-toggle" type="button" title="Choose comparison migration" aria-label="Choose comparison migration" data-comparison-toggle="' + escapeHtml(comparisonMenuId) + '">▾</button>'
+            : '',
+          comparisonMenu,
+          '</span>',
+        ].join(''));
+      } else {
+        actions.push(
+          '<button class="action-button primary" type="button" data-action="latest" data-id="' + escapeHtml(item.id) + '">Open latest</button>',
+        );
+      }
 
       if (item.hasPrevious) {
         actions.push(
@@ -1395,6 +1606,33 @@ function getWebviewHtml(): string {
         '  <div class="rpc-actions">' + actions.join('') + '</div>',
         '</article>',
       ].join('');
+    }
+
+    function renderComparisonMenu(item, menuId) {
+      if (!item.comparisonTargets || item.comparisonTargets.length === 0) {
+        return '';
+      }
+
+      return [
+        '<div id="' + escapeHtml(menuId) + '" class="comparison-menu" data-comparison-menu hidden>',
+        item.comparisonTargets.map((target) => [
+          '<button type="button" data-action="diffTarget" data-id="' + escapeHtml(item.id) + '" data-value="' + escapeHtml(target.key) + '">',
+          '  <span class="comparison-target-label">' + escapeHtml(target.label) + '</span>',
+          '  <span class="comparison-target-path">' + escapeHtml(target.description) + '</span>',
+          '</button>',
+        ].join('')).join(''),
+        '</div>',
+      ].join('');
+    }
+
+    function hashValue(value) {
+      let hash = 0;
+
+      for (let index = 0; index < value.length; index += 1) {
+        hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0;
+      }
+
+      return String(Math.abs(hash));
     }
 
     function escapeHtml(value) {

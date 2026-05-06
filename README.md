@@ -20,6 +20,7 @@ This standalone VS Code extension adds a read-only Supabase RPC and view browser
 - Uses yellow rows for updated objects and green rows for newly introduced objects while leaving unchanged objects with the default styling.
 - Adds its own Activity Bar icon so the object browser is visible in the left sidebar.
 - Opens a side-by-side diff between the latest and previous SQL definitions when a comparison version exists and the object is not new in the current branch.
+- Shows a compact comparison menu next to the Diff button so a specific related migration can be selected as the diff base for the current RPC/view definition.
 - Opens the latest migration file by default for new objects and any object without a diffable previous definition.
 - Shows inline row actions for opening the latest migration file, the previous migration defining the object, and a generated related-queries view.
 - The related-queries view groups helper SQL by migration, wraps each migration block with begin/end comments, and inserts RPC/view version markers where each object definition appears among the helper queries.
