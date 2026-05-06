@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 export type MigrationFileDescriptor = {
   fileName: string;
   content: string;
@@ -68,6 +70,10 @@ const CREATE_OBJECT_PATTERN = new RegExp(
   `^create\\s+(?:or\\s+replace\\s+)?(?:(?:temporary|temp)\\s+)?(?:(?:materialized|recursive)\\s+)?(?:function|view)\\b`,
   'i',
 );
+const MAX_OBJECT_ENTRY_CACHE_SIZE = 2_000;
+
+const objectEntryCache = new Map<string, RpcEntry[]>();
+let objectEntryCacheDirty = false;
 
 type MigrationTimestamp = {
   fileName: string;
@@ -86,6 +92,15 @@ type RpcEntry = {
   uriString: string;
   workspaceRelativePath: string;
   workspaceFolderName?: string;
+};
+
+export type PersistedObjectEntryCache = {
+  entries: PersistedObjectEntryCacheEntry[];
+};
+
+type PersistedObjectEntryCacheEntry = {
+  entries: RpcEntry[];
+  key: string;
 };
 
 type BuildMigrationModelsOptions = {
@@ -110,13 +125,51 @@ export function parseMigrationFileName(
   };
 }
 
+export function consumeObjectEntryCacheDirty(): boolean {
+  const wasDirty = objectEntryCacheDirty;
+
+  objectEntryCacheDirty = false;
+
+  return wasDirty;
+}
+
+export function getPersistedObjectEntryCache(
+  workspaceUriString: string,
+): PersistedObjectEntryCache {
+  return {
+    entries: [...objectEntryCache.entries()]
+      .filter(([key]) => isObjectEntryCacheKeyForWorkspace(key, workspaceUriString))
+      .map(([key, entries]) => ({
+        entries,
+        key,
+      })),
+  };
+}
+
+export function restorePersistedObjectEntryCache(value: unknown): boolean {
+  const persistedCache = parsePersistedObjectEntryCache(value);
+
+  if (!persistedCache) {
+    return false;
+  }
+
+  for (const entry of persistedCache.entries) {
+    objectEntryCache.set(entry.key, entry.entries);
+  }
+
+  trimObjectEntryCache();
+  objectEntryCacheDirty = false;
+
+  return true;
+}
+
 export function buildMigrationModels(
   files: MigrationFileDescriptor[],
   baseFiles: MigrationFileDescriptor[] = [],
   options: BuildMigrationModelsOptions = {},
 ): MigrationModel[] {
   const detectChanges = options.detectChanges ?? true;
-  const objectEntries = files.flatMap(extractObjectEntries);
+  const objectEntries = files.flatMap(getCachedObjectEntries);
   const objectVersionsByName = new Map<string, RpcEntry[]>();
   const baselineVersionsByName = detectChanges
     ? buildLatestObjectVersionIndex(baseFiles)
@@ -462,7 +515,7 @@ function buildLatestObjectVersionIndex(
 ): Map<string, RpcVersionModel> {
   const latestVersionsByName = new Map<string, RpcVersionModel>();
 
-  for (const objectEntry of files.flatMap(extractObjectEntries).sort(compareRpcEntriesNewestFirst)) {
+  for (const objectEntry of files.flatMap(getCachedObjectEntries).sort(compareRpcEntriesNewestFirst)) {
     const normalizedKey = getObjectKey(objectEntry.kind, objectEntry.qualifiedName);
 
     if (!latestVersionsByName.has(normalizedKey)) {
@@ -471,6 +524,229 @@ function buildLatestObjectVersionIndex(
   }
 
   return latestVersionsByName;
+}
+
+function getCachedObjectEntries(file: MigrationFileDescriptor): RpcEntry[] {
+  const cacheKey = getObjectEntryCacheKey(file);
+  const cachedEntries = objectEntryCache.get(cacheKey);
+
+  if (cachedEntries) {
+    return cachedEntries;
+  }
+
+  const entries = extractObjectEntries(file);
+
+  objectEntryCache.set(cacheKey, entries);
+  objectEntryCacheDirty = true;
+  trimObjectEntryCache();
+
+  return entries;
+}
+
+function getObjectEntryCacheKey(file: MigrationFileDescriptor): string {
+  return [
+    file.sourceKind ?? 'workspace',
+    file.uriString,
+    file.workspaceRelativePath,
+    file.fileName,
+    hashString(file.content),
+  ].join('|');
+}
+
+function isObjectEntryCacheKeyForWorkspace(
+  cacheKey: string,
+  workspaceUriString: string,
+): boolean {
+  return cacheKey.startsWith(`workspace|${workspaceUriString}`) ||
+    cacheKey.startsWith(`history|${workspaceUriString}`);
+}
+
+function parsePersistedObjectEntryCache(
+  value: unknown,
+): PersistedObjectEntryCache | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const entriesValue = value.entries;
+
+  if (!Array.isArray(entriesValue)) {
+    return null;
+  }
+
+  const entries: PersistedObjectEntryCacheEntry[] = [];
+
+  for (const entryValue of entriesValue) {
+    const entry = parsePersistedObjectEntryCacheEntry(entryValue);
+
+    if (!entry) {
+      return null;
+    }
+
+    entries.push(entry);
+  }
+
+  return { entries };
+}
+
+function parsePersistedObjectEntryCacheEntry(
+  value: unknown,
+): PersistedObjectEntryCacheEntry | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const key = readStringProperty(value, 'key');
+  const entriesValue = value.entries;
+
+  if (!key || !Array.isArray(entriesValue)) {
+    return null;
+  }
+
+  const entries: RpcEntry[] = [];
+
+  for (const entryValue of entriesValue) {
+    const entry = parseRpcEntry(entryValue);
+
+    if (!entry) {
+      return null;
+    }
+
+    entries.push(entry);
+  }
+
+  return { entries, key };
+}
+
+function parseRpcEntry(value: unknown): RpcEntry | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const fileContent = readStringProperty(value, 'fileContent');
+  const fileName = readStringProperty(value, 'fileName');
+  const kind = readObjectKindProperty(value, 'kind');
+  const qualifiedName = readStringProperty(value, 'qualifiedName');
+  const sqlDefinition = readStringProperty(value, 'sqlDefinition');
+  const sourceKind = readSourceKindProperty(value, 'sourceKind');
+  const timestamp = readNullableStringProperty(value, 'timestamp');
+  const uriString = readStringProperty(value, 'uriString');
+  const workspaceRelativePath = readStringProperty(value, 'workspaceRelativePath');
+  const workspaceFolderName = readOptionalStringProperty(value, 'workspaceFolderName');
+  const startLineValue = value.startLine;
+
+  if (
+    fileContent === undefined ||
+    fileName === undefined ||
+    kind === null ||
+    qualifiedName === undefined ||
+    sqlDefinition === undefined ||
+    sourceKind === null ||
+    timestamp === undefined ||
+    uriString === undefined ||
+    workspaceRelativePath === undefined ||
+    workspaceFolderName === null ||
+    typeof startLineValue !== 'number'
+  ) {
+    return null;
+  }
+
+  return {
+    fileContent,
+    fileName,
+    kind,
+    qualifiedName,
+    sourceKind,
+    sqlDefinition,
+    startLine: startLineValue,
+    timestamp,
+    uriString,
+    workspaceFolderName,
+    workspaceRelativePath,
+  };
+}
+
+function trimObjectEntryCache(): void {
+  while (objectEntryCache.size > MAX_OBJECT_ENTRY_CACHE_SIZE) {
+    const oldestKey = objectEntryCache.keys().next().value as string | undefined;
+
+    if (!oldestKey) {
+      return;
+    }
+
+    objectEntryCache.delete(oldestKey);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function readStringProperty(
+  record: Record<string, unknown>,
+  propertyName: string,
+): string | undefined {
+  const value = record[propertyName];
+
+  return typeof value === 'string'
+    ? value
+    : undefined;
+}
+
+function readOptionalStringProperty(
+  record: Record<string, unknown>,
+  propertyName: string,
+): string | null | undefined {
+  const value = record[propertyName];
+
+  if (value === undefined) {
+    return undefined;
+  }
+
+  return typeof value === 'string'
+    ? value
+    : null;
+}
+
+function readNullableStringProperty(
+  record: Record<string, unknown>,
+  propertyName: string,
+): string | null | undefined {
+  const value = record[propertyName];
+
+  if (value === null) {
+    return null;
+  }
+
+  return typeof value === 'string'
+    ? value
+    : undefined;
+}
+
+function readObjectKindProperty(
+  record: Record<string, unknown>,
+  propertyName: string,
+): MigrationObjectKind | null {
+  const value = record[propertyName];
+
+  if (value === 'rpc' || value === 'view') {
+    return value;
+  }
+
+  return null;
+}
+
+function readSourceKindProperty(
+  record: Record<string, unknown>,
+  propertyName: string,
+): RpcSourceKind | null {
+  const value = record[propertyName];
+
+  if (value === 'workspace' || value === 'history') {
+    return value;
+  }
+
+  return null;
 }
 
 function extractObjectEntries(file: MigrationFileDescriptor): RpcEntry[] {
@@ -515,6 +791,10 @@ function extractObjectEntries(file: MigrationFileDescriptor): RpcEntry[] {
   }
 
   return entries;
+}
+
+function hashString(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
 }
 
 function findObjectDefinitions(

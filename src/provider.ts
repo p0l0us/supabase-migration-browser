@@ -6,9 +6,12 @@ import { promisify } from 'node:util';
 import { parseGitPathList } from './git-status';
 import {
   buildMigrationModels,
+  consumeObjectEntryCacheDirty,
   filterMigrationModels,
   getEmptyState,
   getFilteredSearchEmptyState,
+  getPersistedObjectEntryCache,
+  restorePersistedObjectEntryCache,
   type EmptyStateModel,
   type MigrationKindFilter,
   type MigrationFileDescriptor,
@@ -16,6 +19,10 @@ import {
 } from './migrations';
 
 const execFileAsync = promisify(execFile);
+const MAX_BASE_MIGRATION_CACHE_SIZE = 20;
+const PERSISTENT_CACHE_FILE_NAME = 'supabase-migration-browser-cache.json';
+const PERSISTENT_CACHE_VERSION = 1;
+
 export type ComparisonBranchModel = {
   isDefault: boolean;
   label: string;
@@ -33,6 +40,8 @@ export type ProviderState = {
 
 export class SupabaseMigrationsProvider
   implements vscode.Disposable {
+  private readonly baseMigrationFilesCache = new Map<string, MigrationFileDescriptor[]>();
+  private readonly loadedPersistentCacheWorkspaceUris = new Set<string>();
   private readonly stateEmitter = new vscode.EventEmitter<ProviderState>();
   private readonly watcher: vscode.FileSystemWatcher;
   private cachedState?: ProviderState;
@@ -40,6 +49,7 @@ export class SupabaseMigrationsProvider
   private currentBranch?: string | null;
   private detectGitChanges = false;
   private kindFilter: MigrationKindFilter = 'all';
+  private persistentCacheDirty = false;
   private searchQuery = '';
   private showOnlyChanged = false;
   private stateRequestId = 0;
@@ -61,6 +71,7 @@ export class SupabaseMigrationsProvider
   }
 
   dispose(): void {
+    this.baseMigrationFilesCache.clear();
     this.cachedState = undefined;
     this.watcher.dispose();
     this.stateEmitter.dispose();
@@ -153,6 +164,8 @@ export class SupabaseMigrationsProvider
 
   private async readState(): Promise<ProviderState> {
     const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+    await this.loadPersistentCaches(workspaceFolders);
+
     const files: MigrationFileDescriptor[] = [];
     const baseFiles: MigrationFileDescriptor[] = [];
     const currentBranch = this.detectGitChanges && workspaceFolders[0]
@@ -182,11 +195,16 @@ export class SupabaseMigrationsProvider
 
     for (const workspaceFolder of workspaceFolders) {
       if (this.detectGitChanges) {
-        const workspaceBaseFiles = await getBaseMigrationFiles(
+        const workspaceBaseFilesResult = await getBaseMigrationFiles(
           workspaceFolder,
           selectedComparisonBranch,
+          this.baseMigrationFilesCache,
         );
-        baseFiles.push(...workspaceBaseFiles);
+        baseFiles.push(...workspaceBaseFilesResult.files);
+
+        if (!workspaceBaseFilesResult.cacheHit) {
+          this.persistentCacheDirty = true;
+        }
       }
 
       const migrationFolderUri = vscode.Uri.joinPath(
@@ -254,6 +272,10 @@ export class SupabaseMigrationsProvider
         showOnlyChanged: this.detectGitChanges && this.showOnlyChanged,
       });
 
+    if (consumeObjectEntryCacheDirty() || this.persistentCacheDirty) {
+      await this.savePersistentCaches(workspaceFolders);
+    }
+
     return {
       comparisonBranches,
       detectGitChanges: this.detectGitChanges,
@@ -263,16 +285,125 @@ export class SupabaseMigrationsProvider
       selectedComparisonBranch,
     };
   }
+
+  private async loadPersistentCaches(
+    workspaceFolders: readonly vscode.WorkspaceFolder[],
+  ): Promise<void> {
+    for (const workspaceFolder of workspaceFolders) {
+      const workspaceUriString = workspaceFolder.uri.toString();
+
+      if (this.loadedPersistentCacheWorkspaceUris.has(workspaceUriString)) {
+        continue;
+      }
+
+      this.loadedPersistentCacheWorkspaceUris.add(workspaceUriString);
+
+      const cacheFileUri = getPersistentCacheFileUri(workspaceFolder);
+
+      try {
+        const cacheFileContent = await vscode.workspace.fs.readFile(cacheFileUri);
+        const parsedCache: unknown = JSON.parse(new TextDecoder().decode(cacheFileContent));
+        const cache = parsePersistentWorkspaceCache(parsedCache);
+
+        if (!cache) {
+          continue;
+        }
+
+        restorePersistedObjectEntryCache(cache.objectEntryCache);
+
+        for (const entry of cache.baseMigrationFilesCache) {
+          if (entry.key.startsWith(`${workspaceUriString}|`)) {
+            this.baseMigrationFilesCache.set(entry.key, entry.files);
+          }
+        }
+
+        trimBaseMigrationFilesCache(this.baseMigrationFilesCache);
+      } catch {
+        // Ignore missing or invalid persisted caches; they are only an optimization.
+      }
+    }
+  }
+
+  private async savePersistentCaches(
+    workspaceFolders: readonly vscode.WorkspaceFolder[],
+  ): Promise<void> {
+    let saved = false;
+
+    for (const workspaceFolder of workspaceFolders) {
+      const workspaceUriString = workspaceFolder.uri.toString();
+      const cacheFileUri = getPersistentCacheFileUri(workspaceFolder);
+      const cacheDirectoryUri = vscode.Uri.joinPath(workspaceFolder.uri, '.vscode');
+      const cache: PersistentWorkspaceCache = {
+        baseMigrationFilesCache: getPersistedBaseMigrationFilesCache(
+          this.baseMigrationFilesCache,
+          workspaceUriString,
+        ),
+        objectEntryCache: getPersistedObjectEntryCache(workspaceUriString),
+        savedAt: new Date().toISOString(),
+        version: PERSISTENT_CACHE_VERSION,
+      };
+
+      try {
+        await vscode.workspace.fs.createDirectory(cacheDirectoryUri);
+        await vscode.workspace.fs.writeFile(
+          cacheFileUri,
+          new TextEncoder().encode(JSON.stringify(cache, null, 2)),
+        );
+        saved = true;
+      } catch {
+        // Ignore cache persistence failures; in-memory cache still works.
+      }
+    }
+
+    if (saved) {
+      this.persistentCacheDirty = false;
+    }
+  }
 }
+
+type PersistentWorkspaceCache = {
+  baseMigrationFilesCache: PersistedBaseMigrationFilesCacheEntry[];
+  objectEntryCache: unknown;
+  savedAt: string;
+  version: number;
+};
+
+type PersistedBaseMigrationFilesCacheEntry = {
+  files: MigrationFileDescriptor[];
+  key: string;
+};
+
+type BaseMigrationFilesResult = {
+  cacheHit: boolean;
+  files: MigrationFileDescriptor[];
+};
 
 async function getBaseMigrationFiles(
   workspaceFolder: vscode.WorkspaceFolder,
   comparisonRef: string | null,
-): Promise<MigrationFileDescriptor[]> {
+  cache: Map<string, MigrationFileDescriptor[]>,
+): Promise<BaseMigrationFilesResult> {
   const mergeBase = await resolveMergeBase(workspaceFolder, comparisonRef);
 
   if (!mergeBase) {
-    return [];
+    return {
+      cacheHit: true,
+      files: [],
+    };
+  }
+
+  const cacheKey = getBaseMigrationFilesCacheKey(
+    workspaceFolder,
+    comparisonRef,
+    mergeBase,
+  );
+  const cachedFiles = cache.get(cacheKey);
+
+  if (cachedFiles) {
+    return {
+      cacheHit: true,
+      files: cachedFiles,
+    };
   }
 
   const migrationPaths = await getMigrationPathsAtRef(workspaceFolder, mergeBase);
@@ -299,9 +430,229 @@ async function getBaseMigrationFiles(
     }),
   );
 
-  return migrationFiles.filter(
+  const files = migrationFiles.filter(
     (migrationFile): migrationFile is MigrationFileDescriptor => migrationFile !== null,
   );
+
+  cache.set(cacheKey, files);
+  trimBaseMigrationFilesCache(cache);
+
+  return {
+    cacheHit: false,
+    files,
+  };
+}
+
+function getPersistentCacheFileUri(
+  workspaceFolder: vscode.WorkspaceFolder,
+): vscode.Uri {
+  return vscode.Uri.joinPath(
+    workspaceFolder.uri,
+    '.vscode',
+    PERSISTENT_CACHE_FILE_NAME,
+  );
+}
+
+function getPersistedBaseMigrationFilesCache(
+  cache: Map<string, MigrationFileDescriptor[]>,
+  workspaceUriString: string,
+): PersistedBaseMigrationFilesCacheEntry[] {
+  return [...cache.entries()]
+    .filter(([key]) => key.startsWith(`${workspaceUriString}|`))
+    .map(([key, files]) => ({
+      files,
+      key,
+    }));
+}
+
+function parsePersistentWorkspaceCache(
+  value: unknown,
+): PersistentWorkspaceCache | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const version = value.version;
+  const savedAt = readStringProperty(value, 'savedAt');
+  const baseMigrationFilesCache = parsePersistedBaseMigrationFilesCache(
+    value.baseMigrationFilesCache,
+  );
+  const objectEntryCache = value.objectEntryCache;
+
+  if (
+    version !== PERSISTENT_CACHE_VERSION ||
+    savedAt === undefined ||
+    baseMigrationFilesCache === null ||
+    objectEntryCache === undefined
+  ) {
+    return null;
+  }
+
+  return {
+    baseMigrationFilesCache,
+    objectEntryCache,
+    savedAt,
+    version,
+  };
+}
+
+function parsePersistedBaseMigrationFilesCache(
+  value: unknown,
+): PersistedBaseMigrationFilesCacheEntry[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  const entries: PersistedBaseMigrationFilesCacheEntry[] = [];
+
+  for (const entryValue of value) {
+    const entry = parsePersistedBaseMigrationFilesCacheEntry(entryValue);
+
+    if (!entry) {
+      return null;
+    }
+
+    entries.push(entry);
+  }
+
+  return entries;
+}
+
+function parsePersistedBaseMigrationFilesCacheEntry(
+  value: unknown,
+): PersistedBaseMigrationFilesCacheEntry | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const key = readStringProperty(value, 'key');
+  const filesValue = value.files;
+
+  if (!key || !Array.isArray(filesValue)) {
+    return null;
+  }
+
+  const files: MigrationFileDescriptor[] = [];
+
+  for (const fileValue of filesValue) {
+    const file = parseMigrationFileDescriptor(fileValue);
+
+    if (!file) {
+      return null;
+    }
+
+    files.push(file);
+  }
+
+  return { files, key };
+}
+
+function parseMigrationFileDescriptor(
+  value: unknown,
+): MigrationFileDescriptor | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const content = readStringProperty(value, 'content');
+  const fileName = readStringProperty(value, 'fileName');
+  const uriString = readStringProperty(value, 'uriString');
+  const workspaceRelativePath = readStringProperty(value, 'workspaceRelativePath');
+  const workspaceFolderName = readOptionalStringProperty(value, 'workspaceFolderName');
+  const sourceKind = readOptionalSourceKindProperty(value, 'sourceKind');
+
+  if (
+    content === undefined ||
+    fileName === undefined ||
+    uriString === undefined ||
+    workspaceRelativePath === undefined ||
+    workspaceFolderName === null ||
+    sourceKind === null
+  ) {
+    return null;
+  }
+
+  return {
+    content,
+    fileName,
+    sourceKind,
+    uriString,
+    workspaceFolderName,
+    workspaceRelativePath,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function readStringProperty(
+  record: Record<string, unknown>,
+  propertyName: string,
+): string | undefined {
+  const value = record[propertyName];
+
+  return typeof value === 'string'
+    ? value
+    : undefined;
+}
+
+function readOptionalStringProperty(
+  record: Record<string, unknown>,
+  propertyName: string,
+): string | null | undefined {
+  const value = record[propertyName];
+
+  if (value === undefined) {
+    return undefined;
+  }
+
+  return typeof value === 'string'
+    ? value
+    : null;
+}
+
+function readOptionalSourceKindProperty(
+  record: Record<string, unknown>,
+  propertyName: string,
+): 'workspace' | 'history' | null | undefined {
+  const value = record[propertyName];
+
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === 'workspace' || value === 'history') {
+    return value;
+  }
+
+  return null;
+}
+
+function getBaseMigrationFilesCacheKey(
+  workspaceFolder: vscode.WorkspaceFolder,
+  comparisonRef: string | null,
+  mergeBase: string,
+): string {
+  return [
+    workspaceFolder.uri.toString(),
+    comparisonRef ?? '',
+    mergeBase,
+  ].join('|');
+}
+
+function trimBaseMigrationFilesCache(
+  cache: Map<string, MigrationFileDescriptor[]>,
+): void {
+  while (cache.size > MAX_BASE_MIGRATION_CACHE_SIZE) {
+    const oldestKey = cache.keys().next().value as string | undefined;
+
+    if (!oldestKey) {
+      return;
+    }
+
+    cache.delete(oldestKey);
+  }
 }
 
 async function resolveMergeBase(

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildMigrationModels,
   canOpenRpcDiff,
+  getPersistedObjectEntryCache,
   extractRpcNames,
   extractViewNames,
   filterMigrationModels,
@@ -14,6 +15,7 @@ import {
   hasComparisonMigration,
   normalizeSqlForDiff,
   parseMigrationFileName,
+  restorePersistedObjectEntryCache,
   type MigrationFileDescriptor,
 } from './migrations';
 
@@ -213,6 +215,51 @@ $$;`,
 
     expect(models[0]?.latestVersion.sqlDefinition).toContain('perform 2;');
     expect(models[0]?.previousVersion?.sqlDefinition).toContain('perform 1;');
+  });
+
+  it('re-parses cached migration descriptors when file content changes', () => {
+    const workspaceRelativePath = 'supabase/migrations/20260409120000_cached_rpc.sql';
+    const initialModels = buildMigrationModels([
+      createMigrationFileDescriptor(
+        '20260409120000_cached_rpc.sql',
+        `create or replace function public.cached_rpc() returns int language sql as $$ select 1; $$;`,
+        workspaceRelativePath,
+      ),
+    ]);
+    const updatedModels = buildMigrationModels([
+      createMigrationFileDescriptor(
+        '20260409120000_cached_rpc.sql',
+        `create or replace function public.cached_rpc() returns int language sql as $$ select 2; $$;`,
+        workspaceRelativePath,
+      ),
+    ]);
+
+    expect(initialModels[0]?.latestVersion.sqlDefinition).toContain('select 1;');
+    expect(updatedModels[0]?.latestVersion.sqlDefinition).toContain('select 2;');
+  });
+
+  it('exports and restores persisted object-entry cache snapshots', () => {
+    const workspaceUriString = 'file:///workspace';
+
+    buildMigrationModels([
+      createMigrationFileDescriptor(
+        '20260409120000_persisted_rpc.sql',
+        `create or replace function public.persisted_rpc() returns int language sql as $$ select 1; $$;`,
+      ),
+    ]);
+
+    const persistedCache = getPersistedObjectEntryCache(workspaceUriString);
+    const persistedRpcEntry = persistedCache.entries.find((entry) =>
+      entry.entries.some((objectEntry) => objectEntry.qualifiedName === 'public.persisted_rpc'),
+    );
+
+    expect(persistedRpcEntry?.key).toContain(workspaceUriString);
+    expect(persistedRpcEntry?.entries[0]?.qualifiedName).toBe('public.persisted_rpc');
+    expect(restorePersistedObjectEntryCache(persistedCache)).toBe(true);
+  });
+
+  it('rejects invalid persisted object-entry cache snapshots', () => {
+    expect(restorePersistedObjectEntryCache({ entries: [{ key: 'invalid' }] })).toBe(false);
   });
 
   it('keeps all object versions ordered newest first', () => {

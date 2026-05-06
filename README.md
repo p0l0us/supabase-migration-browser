@@ -7,6 +7,9 @@ This standalone VS Code extension adds a read-only Supabase RPC and view browser
 - Scans `supabase/migrations/*.sql` files from the target workspace.
 - Extracts RPC function and view names exactly as they are declared in SQL.
 - Shows each RPC or view only once, using the newest migration that defines or replaces it.
+- Caches parsed SQL object definitions and target-branch migration snapshots so refreshes avoid reprocessing unchanged historical migrations.
+- Persists the cache in each workspace at `.vscode/supabase-migration-browser-cache.json`, allowing cached migration data to be reused after VS Code restarts.
+- Validates parsed workspace migration cache entries with SHA-256 content hashes and target-branch snapshots with the selected comparison ref plus immutable Git merge-base commit.
 - Filters the list by all objects, RPCs only, or views only.
 - Keeps Git change detection disabled by default so initial browsing does not run Git comparison checks.
 - Provides a `Detect git changes` checkbox that enables local Git comparison against remote-tracking refs.

@@ -1,6 +1,7 @@
 dist
 node_modules
 .vscode-test
+.vscode/supabase-migration-browser-cache.json
 *.vsix
 
 # Local environment and credentials
