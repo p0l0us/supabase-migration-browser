@@ -12,7 +12,11 @@ import {
   type MigrationObjectKind,
   type RpcVersionModel,
 } from './migrations';
-import { SupabaseMigrationsProvider, type ProviderState } from './provider';
+import {
+  SupabaseMigrationsProvider,
+  type ProviderControlsState,
+  type ProviderState,
+} from './provider';
 
 const OPEN_MIGRATION_COMMAND = 'supabaseMigrationsBrowser.openMigration';
 const OPEN_SOURCE_MIGRATION_COMMAND = 'supabaseMigrationsBrowser.openSourceMigration';
@@ -194,6 +198,7 @@ class SupabaseMigrationsViewProvider
   implements vscode.WebviewViewProvider, vscode.Disposable {
   private view?: vscode.WebviewView;
   private shouldFocusSearch = false;
+  private readonly controlsChangeDisposable: vscode.Disposable;
   private viewMessageDisposable?: vscode.Disposable;
   private readonly stateChangeDisposable: vscode.Disposable;
 
@@ -201,6 +206,9 @@ class SupabaseMigrationsViewProvider
     private readonly provider: SupabaseMigrationsProvider,
     private readonly contentProvider: RpcDiffContentProvider,
   ) {
+    this.controlsChangeDisposable = this.provider.onDidChangeControls((state) => {
+      void this.postControls(state);
+    });
     this.stateChangeDisposable = this.provider.onDidChangeState((state) => {
       void this.postState(state);
     });
@@ -208,6 +216,7 @@ class SupabaseMigrationsViewProvider
 
   dispose(): void {
     this.viewMessageDisposable?.dispose();
+    this.controlsChangeDisposable.dispose();
     this.stateChangeDisposable.dispose();
   }
 
@@ -361,6 +370,17 @@ class SupabaseMigrationsViewProvider
       ),
     });
     await this.postFocusSearch();
+  }
+
+  private async postControls(state: ProviderControlsState): Promise<void> {
+    if (!this.view) {
+      return;
+    }
+
+    await this.view.webview.postMessage({
+      type: 'controls',
+      payload: state,
+    });
   }
 
   private async postRefreshing(): Promise<void> {
@@ -1405,28 +1425,20 @@ function getWebviewHtml(): string {
       const message = event.data;
 
       if (message.type === 'state') {
-        state.comparisonBranches = message.payload.comparisonBranches;
-        state.detectGitChanges = message.payload.detectGitChanges;
+        applyControlsState(message.payload);
         state.emptyState = message.payload.emptyState;
         state.items = message.payload.items;
-        state.kindFilter = message.payload.kindFilter;
-        state.searchQuery = message.payload.searchQuery;
-        state.selectedComparisonBranch = message.payload.selectedComparisonBranch;
-        state.showOnlyChanged = message.payload.showOnlyChanged;
         state.isLoading = false;
 
-        if (searchInput.value !== state.searchQuery) {
-          searchInput.value = state.searchQuery;
-        }
-
-        detectGitCheckbox.checked = state.detectGitChanges;
-        changedOnlyCheckbox.checked = state.showOnlyChanged;
-
-        syncClearButton();
-        syncFilterButton();
-        syncGitControls();
-        syncBranchSelect();
+        syncControls();
         render();
+        return;
+      }
+
+      if (message.type === 'controls') {
+        applyControlsState(message.payload);
+        syncControls();
+        renderSummary();
         return;
       }
 
@@ -1444,6 +1456,33 @@ function getWebviewHtml(): string {
 
     function syncClearButton() {
       clearButton.disabled = searchInput.value.length === 0;
+    }
+
+    function applyControlsState(payload) {
+      state.comparisonBranches = Array.isArray(payload.comparisonBranches)
+        ? payload.comparisonBranches
+        : [];
+      state.detectGitChanges = Boolean(payload.detectGitChanges);
+      state.kindFilter = isKindFilter(payload.kindFilter) ? payload.kindFilter : 'all';
+      state.searchQuery = typeof payload.searchQuery === 'string' ? payload.searchQuery : '';
+      state.selectedComparisonBranch = typeof payload.selectedComparisonBranch === 'string'
+        ? payload.selectedComparisonBranch
+        : null;
+      state.showOnlyChanged = Boolean(payload.showOnlyChanged);
+    }
+
+    function syncControls() {
+      if (searchInput.value !== state.searchQuery) {
+        searchInput.value = state.searchQuery;
+      }
+
+      detectGitCheckbox.checked = state.detectGitChanges;
+      changedOnlyCheckbox.checked = state.showOnlyChanged;
+
+      syncClearButton();
+      syncFilterButton();
+      syncGitControls();
+      syncBranchSelect();
     }
 
     function syncFilterButton() {

@@ -15,6 +15,8 @@ This standalone VS Code extension adds a read-only Supabase RPC and view browser
 - Provides a `Detect git changes` checkbox that enables local Git comparison against remote-tracking refs.
 - Shows only new or updated RPCs/views when Git change detection is enabled, with a checkbox to include unchanged objects when needed.
 - Lists origin branches after Git change detection is enabled so you can choose which target branch to compare migrations against.
+- Populates the branch selector before the full migration comparison finishes and keeps branch, filter, and checkbox controls usable during loading.
+- Restarts loading with the latest branch, filter, and checkbox state when those controls change during an in-flight refresh.
 - Selects the current branch base by default when that metadata is available, otherwise falls back to the origin default branch.
 - Compares the current workspace against the selected target branch so the list knows which objects were changed in this branch.
 - Automatically refreshes and reselects the branch base when the current Git branch changes and Git change detection is enabled.

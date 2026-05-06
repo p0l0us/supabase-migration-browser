@@ -38,9 +38,19 @@ export type ProviderState = {
   selectedComparisonBranch: string | null;
 };
 
+export type ProviderControlsState = Pick<
+  ProviderState,
+  'comparisonBranches' | 'detectGitChanges' | 'selectedComparisonBranch'
+> & {
+  kindFilter: MigrationKindFilter;
+  searchQuery: string;
+  showOnlyChanged: boolean;
+};
+
 export class SupabaseMigrationsProvider
   implements vscode.Disposable {
   private readonly baseMigrationFilesCache = new Map<string, MigrationFileDescriptor[]>();
+  private readonly controlsEmitter = new vscode.EventEmitter<ProviderControlsState>();
   private readonly loadedPersistentCacheWorkspaceUris = new Set<string>();
   private readonly stateEmitter = new vscode.EventEmitter<ProviderState>();
   private readonly watcher: vscode.FileSystemWatcher;
@@ -54,6 +64,7 @@ export class SupabaseMigrationsProvider
   private showOnlyChanged = false;
   private stateRequestId = 0;
 
+  readonly onDidChangeControls = this.controlsEmitter.event;
   readonly onDidChangeState = this.stateEmitter.event;
 
   constructor() {
@@ -73,6 +84,7 @@ export class SupabaseMigrationsProvider
   dispose(): void {
     this.baseMigrationFilesCache.clear();
     this.cachedState = undefined;
+    this.controlsEmitter.dispose();
     this.watcher.dispose();
     this.stateEmitter.dispose();
   }
@@ -147,7 +159,7 @@ export class SupabaseMigrationsProvider
     }
 
     const requestId = ++this.stateRequestId;
-    const state = await this.readState();
+    const state = await this.readState(requestId, emit);
 
     if (requestId !== this.stateRequestId) {
       return this.cachedState ?? state;
@@ -162,7 +174,10 @@ export class SupabaseMigrationsProvider
     return state;
   }
 
-  private async readState(): Promise<ProviderState> {
+  private async readState(
+    requestId: number,
+    emitControls: boolean,
+  ): Promise<ProviderState> {
     const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
     await this.loadPersistentCaches(workspaceFolders);
 
@@ -190,6 +205,17 @@ export class SupabaseMigrationsProvider
       : null;
 
     this.comparisonBranch = selectedComparisonBranch ?? undefined;
+
+    if (emitControls && requestId === this.stateRequestId) {
+      this.controlsEmitter.fire({
+        comparisonBranches,
+        detectGitChanges: this.detectGitChanges,
+        kindFilter: this.kindFilter,
+        searchQuery: this.searchQuery,
+        selectedComparisonBranch,
+        showOnlyChanged: this.showOnlyChanged,
+      });
+    }
 
     let hasMigrationsFolder = false;
 
