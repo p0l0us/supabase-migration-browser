@@ -22,6 +22,8 @@ const execFileAsync = promisify(execFile);
 const MAX_BASE_MIGRATION_CACHE_SIZE = 20;
 const PERSISTENT_CACHE_FILE_NAME = 'supabase-migration-browser-cache.json';
 const PERSISTENT_CACHE_VERSION = 1;
+const TARGET_BRANCH_GIT_READ_CONCURRENCY = 6;
+const WORKSPACE_FILE_READ_CONCURRENCY = 24;
 
 export type ComparisonBranchModel = {
   isDefault: boolean;
@@ -271,26 +273,33 @@ export class SupabaseMigrationsProvider
       ));
       let readFileCount = 0;
 
-      for (const [entryName] of sqlEntries) {
-        readFileCount += 1;
-        this.emitLoadingStatus(
-          requestId,
-          emitControls,
-          `Reading workspace migration ${entryName}`,
-          getProgressPercent(readFileCount, sqlEntries.length),
-        );
-        const fileUri = vscode.Uri.joinPath(migrationFolderUri, entryName);
-        const fileContent = await vscode.workspace.fs.readFile(fileUri);
-        const workspaceRelativePath = vscode.workspace.asRelativePath(fileUri, false);
+      const workspaceMigrationFiles = await mapWithConcurrency(
+        sqlEntries,
+        WORKSPACE_FILE_READ_CONCURRENCY,
+        async ([entryName]) => {
+          const fileUri = vscode.Uri.joinPath(migrationFolderUri, entryName);
+          const fileContent = await vscode.workspace.fs.readFile(fileUri);
+          const workspaceRelativePath = vscode.workspace.asRelativePath(fileUri, false);
 
-        files.push({
-          content: new TextDecoder().decode(fileContent),
-          fileName: entryName,
-          uriString: fileUri.toString(),
-          workspaceRelativePath,
-          workspaceFolderName: workspaceFolder.name,
-        });
-      }
+          readFileCount += 1;
+          this.emitLoadingStatus(
+            requestId,
+            emitControls,
+            `Reading workspace migration ${entryName}`,
+            getProgressPercent(readFileCount, sqlEntries.length),
+          );
+
+          return {
+            content: new TextDecoder().decode(fileContent),
+            fileName: entryName,
+            uriString: fileUri.toString(),
+            workspaceRelativePath,
+            workspaceFolderName: workspaceFolder.name,
+          } satisfies MigrationFileDescriptor;
+        },
+      );
+
+      files.push(...workspaceMigrationFiles);
     }
 
     this.emitLoadingStatus(requestId, emitControls, 'Parsing RPCs and views from migrations');
@@ -480,33 +489,37 @@ async function getBaseMigrationFiles(
 
   onProgress?.({ detail: `Listing target-branch migrations at ${mergeBase.slice(0, 8)}` });
   const migrationPaths = await getMigrationPathsAtRef(workspaceFolder, mergeBase);
-  const migrationFiles: Array<MigrationFileDescriptor | null> = [];
+  let readMigrationCount = 0;
+  const migrationFiles = await mapWithConcurrency<string, MigrationFileDescriptor | null>(
+    migrationPaths,
+    TARGET_BRANCH_GIT_READ_CONCURRENCY,
+    async (migrationPath) => {
+      const content = await getFileContentAtRef(
+        workspaceFolder,
+        mergeBase,
+        migrationPath,
+      );
 
-  for (const [index, migrationPath] of migrationPaths.entries()) {
-    onProgress?.({
-      detail: `Reading target migration ${path.posix.basename(migrationPath)} from Git`,
-      progressPercent: getProgressPercent(index + 1, migrationPaths.length),
-    });
-    const content = await getFileContentAtRef(
-      workspaceFolder,
-      mergeBase,
-      migrationPath,
-    );
+      readMigrationCount += 1;
+      onProgress?.({
+        detail: `Reading target migration ${path.posix.basename(migrationPath)} from Git`,
+        progressPercent: getProgressPercent(readMigrationCount, migrationPaths.length),
+      });
 
-    if (content === null) {
-      migrationFiles.push(null);
-      continue;
-    }
+      if (content === null) {
+        return null;
+      }
 
-    migrationFiles.push({
-      content,
-      fileName: path.posix.basename(migrationPath),
-      sourceKind: 'history',
-      uriString: vscode.Uri.joinPath(workspaceFolder.uri, migrationPath).toString(),
-      workspaceRelativePath: migrationPath,
-      workspaceFolderName: workspaceFolder.name,
-    } satisfies MigrationFileDescriptor);
-  }
+      return {
+        content,
+        fileName: path.posix.basename(migrationPath),
+        sourceKind: 'history',
+        uriString: vscode.Uri.joinPath(workspaceFolder.uri, migrationPath).toString(),
+        workspaceRelativePath: migrationPath,
+        workspaceFolderName: workspaceFolder.name,
+      } satisfies MigrationFileDescriptor;
+    },
+  );
 
   const files = migrationFiles.filter(
     (migrationFile): migrationFile is MigrationFileDescriptor => migrationFile !== null,
@@ -519,6 +532,36 @@ async function getBaseMigrationFiles(
     cacheHit: false,
     files,
   };
+}
+
+async function mapWithConcurrency<TItem, TResult>(
+  items: readonly TItem[],
+  concurrency: number,
+  mapper: (item: TItem, index: number) => Promise<TResult>,
+): Promise<TResult[]> {
+  if (items.length === 0) {
+    return [];
+  }
+
+  const normalizedConcurrency = Math.max(1, Math.min(concurrency, items.length));
+  const results = new Array<TResult>(items.length);
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  }
+
+  await Promise.all(Array.from(
+    { length: normalizedConcurrency },
+    () => worker(),
+  ));
+
+  return results;
 }
 
 function getProgressPercent(
