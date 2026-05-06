@@ -24,14 +24,17 @@ This standalone VS Code extension adds a read-only Supabase RPC and view browser
 - Displays the timestamp of the latest migration that edited the object.
 - Uses yellow rows for updated objects and green rows for newly introduced objects while leaving unchanged objects with the default styling.
 - Adds its own Activity Bar icon so the object browser is visible in the left sidebar.
-- Opens a side-by-side diff between the latest and previous SQL definitions when a comparison version exists and the object is not new in the current branch.
+- Opens a side-by-side diff whenever a previous workspace definition or target-branch comparison definition exists.
 - Shows a compact comparison menu next to the Diff button so a specific related migration can be selected as the diff base for the current RPC/view definition.
+- Shows a compact current-migration selector next to the displayed migration path when an object has more than two workspace versions, excluding the oldest version because it has no earlier workspace version to compare from.
+- Filters the diff-base menu to migrations older than the selected current migration so diff direction cannot be accidentally reversed.
 - Opens the latest migration file by default for new objects and any object without a diffable previous definition.
-- Shows inline row actions for opening the latest migration file, the previous migration defining the object, and a generated related-queries view.
+- Shows inline row actions for opening the latest migration file, the previous workspace migration defining the object when one exists, and a generated related-queries view.
 - The related-queries view groups helper SQL by migration, wraps each migration block with begin/end comments, and inserts RPC/view version markers where each object definition appears among the helper queries.
 - Keeps a permanent search field pinned at the top of the sidebar and still lets the toolbar search action focus that field.
 - Makes search and RPC/view filtering respect the active changed-only and comparison-branch controls.
 - Adds a refresh action to reload the list and shows a loading state while refreshed data is being read.
+- Shows detailed loading status at the bottom of the panel with Git/cache/file-reading phases and percentage progress when the total number of migrations is known.
 - Shows a clear empty state when the migrations folder is missing or no RPCs/views are defined.
 
 ## Scope

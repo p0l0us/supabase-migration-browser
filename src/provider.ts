@@ -47,10 +47,16 @@ export type ProviderControlsState = Pick<
   showOnlyChanged: boolean;
 };
 
+export type ProviderLoadingStatus = {
+  detail: string;
+  progressPercent?: number;
+};
+
 export class SupabaseMigrationsProvider
   implements vscode.Disposable {
   private readonly baseMigrationFilesCache = new Map<string, MigrationFileDescriptor[]>();
   private readonly controlsEmitter = new vscode.EventEmitter<ProviderControlsState>();
+  private readonly loadingStatusEmitter = new vscode.EventEmitter<ProviderLoadingStatus>();
   private readonly loadedPersistentCacheWorkspaceUris = new Set<string>();
   private readonly stateEmitter = new vscode.EventEmitter<ProviderState>();
   private readonly watcher: vscode.FileSystemWatcher;
@@ -65,6 +71,7 @@ export class SupabaseMigrationsProvider
   private stateRequestId = 0;
 
   readonly onDidChangeControls = this.controlsEmitter.event;
+  readonly onDidChangeLoadingStatus = this.loadingStatusEmitter.event;
   readonly onDidChangeState = this.stateEmitter.event;
 
   constructor() {
@@ -85,6 +92,7 @@ export class SupabaseMigrationsProvider
     this.baseMigrationFilesCache.clear();
     this.cachedState = undefined;
     this.controlsEmitter.dispose();
+    this.loadingStatusEmitter.dispose();
     this.watcher.dispose();
     this.stateEmitter.dispose();
   }
@@ -179,10 +187,12 @@ export class SupabaseMigrationsProvider
     emitControls: boolean,
   ): Promise<ProviderState> {
     const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+    this.emitLoadingStatus(requestId, emitControls, 'Loading persisted cache');
     await this.loadPersistentCaches(workspaceFolders);
 
     const files: MigrationFileDescriptor[] = [];
     const baseFiles: MigrationFileDescriptor[] = [];
+    this.emitLoadingStatus(requestId, emitControls, 'Checking current Git branch');
     const currentBranch = this.detectGitChanges && workspaceFolders[0]
       ? await getCurrentBranch(workspaceFolders[0])
       : null;
@@ -193,9 +203,13 @@ export class SupabaseMigrationsProvider
 
     this.currentBranch = currentBranch;
 
+    this.emitLoadingStatus(requestId, emitControls, this.detectGitChanges
+      ? 'Listing origin branches from local Git refs'
+      : 'Git detection disabled');
     const comparisonBranches = this.detectGitChanges && workspaceFolders[0]
       ? await getOriginBranches(workspaceFolders[0])
       : [];
+    this.emitLoadingStatus(requestId, emitControls, 'Resolving comparison branch');
     const selectedComparisonBranch = this.detectGitChanges
       ? await resolveSelectedComparisonBranch(
         workspaceFolders[0],
@@ -225,6 +239,7 @@ export class SupabaseMigrationsProvider
           workspaceFolder,
           selectedComparisonBranch,
           this.baseMigrationFilesCache,
+          (status) => this.emitLoadingStatus(requestId, emitControls, status.detail, status.progressPercent),
         );
         baseFiles.push(...workspaceBaseFilesResult.files);
 
@@ -242,6 +257,7 @@ export class SupabaseMigrationsProvider
       let directoryEntries: [string, vscode.FileType][];
 
       try {
+        this.emitLoadingStatus(requestId, emitControls, `Reading ${workspaceFolder.name} migration directory`);
         directoryEntries = await vscode.workspace.fs.readDirectory(
           migrationFolderUri,
         );
@@ -250,14 +266,19 @@ export class SupabaseMigrationsProvider
         continue;
       }
 
-      for (const [entryName, fileType] of directoryEntries) {
-        if (
-          fileType !== vscode.FileType.File ||
-          !entryName.toLowerCase().endsWith('.sql')
-        ) {
-          continue;
-        }
+      const sqlEntries = directoryEntries.filter(([entryName, fileType]) => (
+        fileType === vscode.FileType.File && entryName.toLowerCase().endsWith('.sql')
+      ));
+      let readFileCount = 0;
 
+      for (const [entryName] of sqlEntries) {
+        readFileCount += 1;
+        this.emitLoadingStatus(
+          requestId,
+          emitControls,
+          `Reading workspace migration ${entryName}`,
+          getProgressPercent(readFileCount, sqlEntries.length),
+        );
         const fileUri = vscode.Uri.joinPath(migrationFolderUri, entryName);
         const fileContent = await vscode.workspace.fs.readFile(fileUri);
         const workspaceRelativePath = vscode.workspace.asRelativePath(fileUri, false);
@@ -272,9 +293,11 @@ export class SupabaseMigrationsProvider
       }
     }
 
+    this.emitLoadingStatus(requestId, emitControls, 'Parsing RPCs and views from migrations');
     const items = buildMigrationModels(files, baseFiles, {
       detectChanges: this.detectGitChanges,
     });
+    this.emitLoadingStatus(requestId, emitControls, 'Applying search, type, and changed-only filters');
     const filteredItems = filterMigrationModels(
       items,
       this.searchQuery,
@@ -299,6 +322,7 @@ export class SupabaseMigrationsProvider
       });
 
     if (consumeObjectEntryCacheDirty() || this.persistentCacheDirty) {
+      this.emitLoadingStatus(requestId, emitControls, 'Saving workspace cache');
       await this.savePersistentCaches(workspaceFolders);
     }
 
@@ -385,6 +409,22 @@ export class SupabaseMigrationsProvider
       this.persistentCacheDirty = false;
     }
   }
+
+  private emitLoadingStatus(
+    requestId: number,
+    emit: boolean,
+    detail: string,
+    progressPercent?: number,
+  ): void {
+    if (!emit || requestId !== this.stateRequestId) {
+      return;
+    }
+
+    this.loadingStatusEmitter.fire({
+      detail,
+      progressPercent,
+    });
+  }
 }
 
 type PersistentWorkspaceCache = {
@@ -408,7 +448,9 @@ async function getBaseMigrationFiles(
   workspaceFolder: vscode.WorkspaceFolder,
   comparisonRef: string | null,
   cache: Map<string, MigrationFileDescriptor[]>,
+  onProgress?: (status: ProviderLoadingStatus) => void,
 ): Promise<BaseMigrationFilesResult> {
+  onProgress?.({ detail: `Resolving Git merge-base for ${comparisonRef ?? 'default branch'}` });
   const mergeBase = await resolveMergeBase(workspaceFolder, comparisonRef);
 
   if (!mergeBase) {
@@ -426,35 +468,45 @@ async function getBaseMigrationFiles(
   const cachedFiles = cache.get(cacheKey);
 
   if (cachedFiles) {
+    onProgress?.({
+      detail: `Using cached target-branch migrations for ${comparisonRef ?? mergeBase}`,
+      progressPercent: 100,
+    });
     return {
       cacheHit: true,
       files: cachedFiles,
     };
   }
 
+  onProgress?.({ detail: `Listing target-branch migrations at ${mergeBase.slice(0, 8)}` });
   const migrationPaths = await getMigrationPathsAtRef(workspaceFolder, mergeBase);
-  const migrationFiles: Array<MigrationFileDescriptor | null> = await Promise.all(
-    migrationPaths.map(async (migrationPath) => {
-      const content = await getFileContentAtRef(
-        workspaceFolder,
-        mergeBase,
-        migrationPath,
-      );
+  const migrationFiles: Array<MigrationFileDescriptor | null> = [];
 
-      if (content === null) {
-        return null;
-      }
+  for (const [index, migrationPath] of migrationPaths.entries()) {
+    onProgress?.({
+      detail: `Reading target migration ${path.posix.basename(migrationPath)} from Git`,
+      progressPercent: getProgressPercent(index + 1, migrationPaths.length),
+    });
+    const content = await getFileContentAtRef(
+      workspaceFolder,
+      mergeBase,
+      migrationPath,
+    );
 
-      return {
-        content,
-        fileName: path.posix.basename(migrationPath),
-        sourceKind: 'history',
-        uriString: vscode.Uri.joinPath(workspaceFolder.uri, migrationPath).toString(),
-        workspaceRelativePath: migrationPath,
-        workspaceFolderName: workspaceFolder.name,
-      } satisfies MigrationFileDescriptor;
-    }),
-  );
+    if (content === null) {
+      migrationFiles.push(null);
+      continue;
+    }
+
+    migrationFiles.push({
+      content,
+      fileName: path.posix.basename(migrationPath),
+      sourceKind: 'history',
+      uriString: vscode.Uri.joinPath(workspaceFolder.uri, migrationPath).toString(),
+      workspaceRelativePath: migrationPath,
+      workspaceFolderName: workspaceFolder.name,
+    } satisfies MigrationFileDescriptor);
+  }
 
   const files = migrationFiles.filter(
     (migrationFile): migrationFile is MigrationFileDescriptor => migrationFile !== null,
@@ -467,6 +519,17 @@ async function getBaseMigrationFiles(
     cacheHit: false,
     files,
   };
+}
+
+function getProgressPercent(
+  completedCount: number,
+  totalCount: number,
+): number | undefined {
+  if (totalCount <= 0) {
+    return undefined;
+  }
+
+  return Math.min(100, Math.max(0, Math.round((completedCount / totalCount) * 100)));
 }
 
 function getPersistentCacheFileUri(

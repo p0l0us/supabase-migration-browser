@@ -15,6 +15,7 @@ import {
 import {
   SupabaseMigrationsProvider,
   type ProviderControlsState,
+  type ProviderLoadingStatus,
   type ProviderState,
 } from './provider';
 
@@ -113,12 +114,12 @@ async function openPreviousMigration(
   model: MigrationModel | undefined,
   contentProvider: RpcDiffContentProvider,
 ): Promise<void> {
-  if (!model?.comparisonVersion) {
+  if (!model?.previousVersion) {
     return;
   }
 
   try {
-    await openRpcVersion(model.comparisonVersion, contentProvider);
+    await openRpcVersion(model.previousVersion, contentProvider);
   } catch {
     void vscode.window.showErrorMessage('Failed to open the previous migration file for the selected Supabase object.');
   }
@@ -155,16 +156,17 @@ async function openMigrationDiff(
   model: MigrationModel | undefined,
   contentProvider: RpcDiffContentProvider,
   comparisonVersionOverride?: RpcVersionModel,
+  sourceVersionOverride?: RpcVersionModel,
 ): Promise<void> {
   if (!model) {
     return;
   }
 
   try {
-    const latestVersion = model.latestVersion;
+    const latestVersion = sourceVersionOverride ?? model.latestVersion;
     const previousVersion = comparisonVersionOverride ?? model.comparisonVersion;
 
-    if (!previousVersion) {
+    if (!previousVersion || !canCompareVersionsInOrder(model, latestVersion, previousVersion)) {
       await openSourceMigration(model, contentProvider);
       return;
     }
@@ -199,6 +201,7 @@ class SupabaseMigrationsViewProvider
   private view?: vscode.WebviewView;
   private shouldFocusSearch = false;
   private readonly controlsChangeDisposable: vscode.Disposable;
+  private readonly loadingStatusDisposable: vscode.Disposable;
   private viewMessageDisposable?: vscode.Disposable;
   private readonly stateChangeDisposable: vscode.Disposable;
 
@@ -209,6 +212,9 @@ class SupabaseMigrationsViewProvider
     this.controlsChangeDisposable = this.provider.onDidChangeControls((state) => {
       void this.postControls(state);
     });
+    this.loadingStatusDisposable = this.provider.onDidChangeLoadingStatus((status) => {
+      void this.postLoadingStatus(status);
+    });
     this.stateChangeDisposable = this.provider.onDidChangeState((state) => {
       void this.postState(state);
     });
@@ -217,6 +223,7 @@ class SupabaseMigrationsViewProvider
   dispose(): void {
     this.viewMessageDisposable?.dispose();
     this.controlsChangeDisposable.dispose();
+    this.loadingStatusDisposable.dispose();
     this.stateChangeDisposable.dispose();
   }
 
@@ -274,6 +281,7 @@ class SupabaseMigrationsViewProvider
       id?: string;
       type?: string;
       value?: string;
+      source?: string;
       checked?: boolean;
     };
 
@@ -319,7 +327,14 @@ class SupabaseMigrationsViewProvider
       }
 
       if (typedMessage.action === 'diff') {
-        await openMigrationDiff(model, this.contentProvider);
+        await openMigrationDiff(
+          model,
+          this.contentProvider,
+          undefined,
+          typeof typedMessage.source === 'string'
+            ? findSourceVersionByKey(model, typedMessage.source)
+            : undefined,
+        );
         return;
       }
 
@@ -328,6 +343,9 @@ class SupabaseMigrationsViewProvider
           model,
           this.contentProvider,
           findComparisonVersionByKey(model, typedMessage.value),
+          typeof typedMessage.source === 'string'
+            ? findSourceVersionByKey(model, typedMessage.source)
+            : undefined,
         );
         return;
       }
@@ -383,12 +401,28 @@ class SupabaseMigrationsViewProvider
     });
   }
 
+  private async postLoadingStatus(status: ProviderLoadingStatus): Promise<void> {
+    if (!this.view) {
+      return;
+    }
+
+    await this.view.webview.postMessage({
+      type: 'loadingStatus',
+      payload: status,
+    });
+  }
+
   private async postRefreshing(): Promise<void> {
     if (!this.view) {
       return;
     }
 
-    await this.view.webview.postMessage({ type: 'refreshing' });
+    await this.view.webview.postMessage({
+      type: 'refreshing',
+      payload: {
+        detail: 'Starting refresh',
+      },
+    });
   }
 
   private async postFocusSearch(): Promise<void> {
@@ -586,7 +620,7 @@ function getObjectKindLabel(kind: MigrationObjectKind): string {
 type WebviewMigrationItem = {
   canDiff: boolean;
   changeState: 'new' | 'updated' | 'unchanged';
-  comparisonTargets: WebviewComparisonTarget[];
+  comparisonTargets: WebviewMigrationVersion[];
   description: string;
   hasPrevious: boolean;
   hasRelatedQueries: boolean;
@@ -595,12 +629,18 @@ type WebviewMigrationItem = {
   label: string;
   path: string;
   primaryAction: 'diff' | 'latest';
+  selectedSourceKey: string;
+  sourceOptions: WebviewMigrationVersion[];
 };
 
-type WebviewComparisonTarget = {
+type WebviewMigrationVersion = {
   description: string;
+  fileName: string;
   key: string;
   label: string;
+  order: number | null;
+  sortKey: string;
+  sourceKind: 'workspace' | 'history';
 };
 
 type WebviewState = {
@@ -630,20 +670,23 @@ function buildWebviewState(
     detectGitChanges,
     emptyState: state.emptyState,
     items: state.items.map((model) => {
-      const canDiff = canOpenRpcDiff(model);
+      const comparisonTargets = buildComparisonTargets(model);
+      const canDiff = canOpenRpcDiff(model) || comparisonTargets.length > 0;
 
       return {
         canDiff,
         changeState: model.changeState ?? 'unchanged',
-        comparisonTargets: buildComparisonTargets(model),
+        comparisonTargets,
         description: buildItemDescription(model, state.includeWorkspaceName),
-        hasPrevious: hasComparisonMigration(model),
+        hasPrevious: model.previousVersion !== null,
         hasRelatedQueries: hasMigrationRelatedQueriesContent(model),
         id: model.id,
         kind: model.kind,
         label: model.label,
         path: model.workspaceRelativePath,
         primaryAction: canDiff ? 'diff' : 'latest',
+        selectedSourceKey: getVersionKey(model.latestVersion),
+        sourceOptions: buildSourceOptions(model),
       };
     }),
     kindFilter,
@@ -653,12 +696,29 @@ function buildWebviewState(
   };
 }
 
-function buildComparisonTargets(model: MigrationModel): WebviewComparisonTarget[] {
+function buildSourceOptions(model: MigrationModel): WebviewMigrationVersion[] {
+  const sourceVersions = model.allVersions.length === 1
+    ? model.allVersions
+    : model.allVersions.slice(0, -1);
+
+  if (sourceVersions.length === 0) {
+    return [];
+  }
+
+  return sourceVersions
+    .map((version, index) => toWebviewMigrationVersion(
+      version,
+      index,
+      formatSourceMigrationLabel(version, index === 0),
+    ));
+}
+
+function buildComparisonTargets(model: MigrationModel): WebviewMigrationVersion[] {
   const targetVersions = [
     model.comparisonVersion,
     ...model.allVersions.slice(1),
   ];
-  const targets: WebviewComparisonTarget[] = [];
+  const targets: WebviewMigrationVersion[] = [];
   const seenKeys = new Set<string>();
 
   for (const targetVersion of targetVersions) {
@@ -673,14 +733,30 @@ function buildComparisonTargets(model: MigrationModel): WebviewComparisonTarget[
     }
 
     seenKeys.add(key);
-    targets.push({
-      description: targetVersion.workspaceRelativePath,
-      key,
-      label: formatComparisonTargetLabel(targetVersion, targets.length === 0),
-    });
+    targets.push(toWebviewMigrationVersion(
+      targetVersion,
+      getWorkspaceVersionOrder(model, targetVersion),
+      formatComparisonTargetLabel(targetVersion, targets.length === 0),
+    ));
   }
 
   return targets;
+}
+
+function toWebviewMigrationVersion(
+  version: RpcVersionModel,
+  order: number | null,
+  label: string,
+): WebviewMigrationVersion {
+  return {
+    description: version.workspaceRelativePath,
+    fileName: version.fileName,
+    key: getVersionKey(version),
+    label,
+    order,
+    sortKey: getVersionSortKey(version),
+    sourceKind: version.sourceKind,
+  };
 }
 
 function findComparisonVersionByKey(
@@ -695,6 +771,48 @@ function findComparisonVersionByKey(
   return targetVersions.find((targetVersion): targetVersion is RpcVersionModel => (
     Boolean(targetVersion) && getVersionKey(targetVersion as RpcVersionModel) === versionKey
   ));
+}
+
+function findSourceVersionByKey(
+  model: MigrationModel,
+  versionKey: string,
+): RpcVersionModel | undefined {
+  return model.allVersions.find((version) => getVersionKey(version) === versionKey);
+}
+
+function canCompareVersionsInOrder(
+  model: MigrationModel,
+  sourceVersion: RpcVersionModel,
+  targetVersion: RpcVersionModel,
+): boolean {
+  if (getVersionKey(sourceVersion) === getVersionKey(targetVersion)) {
+    return false;
+  }
+
+  const sourceOrder = getWorkspaceVersionOrder(model, sourceVersion);
+  const targetOrder = getWorkspaceVersionOrder(model, targetVersion);
+
+  if (sourceOrder === null) {
+    return false;
+  }
+
+  if (targetOrder !== null) {
+    return targetOrder > sourceOrder;
+  }
+
+  return getVersionSortKey(targetVersion) < getVersionSortKey(sourceVersion);
+}
+
+function getWorkspaceVersionOrder(
+  model: MigrationModel,
+  version: RpcVersionModel,
+): number | null {
+  const versionKey = getVersionKey(version);
+  const versionIndex = model.allVersions.findIndex((candidate) =>
+    getVersionKey(candidate) === versionKey,
+  );
+
+  return versionIndex >= 0 ? versionIndex : null;
 }
 
 function getVersionKey(version: RpcVersionModel): string {
@@ -720,6 +838,22 @@ function formatComparisonTargetLabel(
   const defaultPrefix = isDefaultTarget ? 'Default · ' : '';
 
   return `${defaultPrefix}${sourceLabel} · ${versionLabel}`;
+}
+
+function formatSourceMigrationLabel(
+  version: RpcVersionModel,
+  isCurrentSource: boolean,
+): string {
+  const versionLabel = version.timestamp
+    ? formatTimestampLabel(version.timestamp)
+    : version.fileName;
+  const currentPrefix = isCurrentSource ? 'Current · ' : '';
+
+  return `${currentPrefix}Workspace migration · ${versionLabel}`;
+}
+
+function getVersionSortKey(version: RpcVersionModel): string {
+  return version.timestamp ?? version.fileName;
 }
 
 function formatTimestampLabel(timestamp: string): string {
@@ -810,6 +944,57 @@ function getWebviewHtml(): string {
       width: 100%;
       min-height: 100vh;
       overflow-x: hidden;
+    }
+
+    .status-bar {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 28px;
+      padding: 7px 12px;
+      border-top: 1px solid var(--vscode-sideBar-border, var(--vscode-panel-border));
+      background: var(--vscode-statusBar-background, var(--vscode-sideBar-background));
+      color: var(--vscode-statusBar-foreground, var(--vscode-sideBar-foreground));
+      font-size: 12px;
+      box-shadow: 0 -8px 20px color-mix(in srgb, #000 16%, transparent);
+    }
+
+    .status-bar[hidden] {
+      display: none;
+    }
+
+    .status-spinner {
+      flex: none;
+      width: 12px;
+      height: 12px;
+      border: 2px solid color-mix(in srgb, currentColor 28%, transparent);
+      border-top-color: currentColor;
+      border-radius: 999px;
+      animation: spin 0.85s linear infinite;
+    }
+
+    .status-text {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .status-spinner {
+        animation: none;
+      }
     }
 
     .search-shell {
@@ -1006,7 +1191,7 @@ function getWebviewHtml(): string {
     .content {
       display: grid;
       gap: 10px;
-      padding: 12px;
+      padding: 12px 12px 46px;
       min-width: 0;
     }
 
@@ -1067,6 +1252,37 @@ function getWebviewHtml(): string {
       word-break: break-all;
     }
 
+    .rpc-source-row {
+      position: relative;
+      display: flex;
+      gap: 6px;
+      align-items: flex-start;
+      padding: 0 12px;
+      margin-top: 6px;
+      min-width: 0;
+    }
+
+    .rpc-source-row .rpc-path {
+      flex: 1 1 auto;
+      padding: 0;
+      margin-top: 0;
+    }
+
+    .source-toggle-button {
+      flex: none;
+      min-width: 26px;
+      min-height: 22px;
+      padding: 2px 7px;
+      border: 1px solid var(--vscode-button-border, transparent);
+      border-radius: 7px;
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
     .rpc-actions {
       display: flex;
       flex-wrap: wrap;
@@ -1117,6 +1333,13 @@ function getWebviewHtml(): string {
 
     .comparison-menu[hidden] {
       display: none;
+    }
+
+    .source-menu {
+      top: calc(100% + 6px);
+      right: 12px;
+      left: auto;
+      bottom: auto;
     }
 
     .comparison-menu button {
@@ -1253,6 +1476,10 @@ function getWebviewHtml(): string {
       <div id="summary" class="summary">Loading Supabase objects...</div>
     </header>
     <main id="content" class="content"></main>
+    <footer id="status-bar" class="status-bar" aria-live="polite" hidden>
+      <span class="status-spinner" aria-hidden="true"></span>
+      <span id="status-text" class="status-text">Loading Supabase objects...</span>
+    </footer>
   </div>
 
   <script nonce="${nonce}">
@@ -1267,6 +1494,8 @@ function getWebviewHtml(): string {
     const branchLabel = document.getElementById('branch-label');
     const branchSelect = document.getElementById('branch-select');
     const summary = document.getElementById('summary');
+    const statusBar = document.getElementById('status-bar');
+    const statusText = document.getElementById('status-text');
     const content = document.getElementById('content');
     const state = {
       comparisonBranches: [],
@@ -1278,7 +1507,10 @@ function getWebviewHtml(): string {
       selectedComparisonBranch: null,
       showOnlyChanged: false,
       isLoading: true,
+      loadingDetail: 'Starting refresh',
+      loadingProgressPercent: null,
     };
+    const selectedSourcesByItemId = new Map();
     let searchTimer = undefined;
 
     content.addEventListener('click', (event) => {
@@ -1294,6 +1526,25 @@ function getWebviewHtml(): string {
         return;
       }
 
+      const sourceToggle = event.target.closest('[data-source-toggle]');
+
+      if (sourceToggle) {
+        event.stopPropagation();
+        toggleComparisonMenu(sourceToggle.getAttribute('data-source-toggle'));
+        return;
+      }
+
+      const sourceTarget = event.target.closest('[data-source-select]');
+
+      if (sourceTarget) {
+        event.stopPropagation();
+        setSelectedSource(
+          sourceTarget.getAttribute('data-id'),
+          sourceTarget.getAttribute('data-source-select'),
+        );
+        return;
+      }
+
       const actionTarget = event.target.closest('[data-action]');
 
       if (!actionTarget) {
@@ -1303,6 +1554,7 @@ function getWebviewHtml(): string {
       const action = actionTarget.getAttribute('data-action');
       const id = actionTarget.getAttribute('data-id');
       const value = actionTarget.getAttribute('data-value');
+      const source = actionTarget.getAttribute('data-source');
 
       if (!action || !id) {
         return;
@@ -1314,6 +1566,7 @@ function getWebviewHtml(): string {
         type: 'action',
         action,
         id,
+        source,
         value,
       });
     });
@@ -1322,6 +1575,7 @@ function getWebviewHtml(): string {
       state.searchQuery = searchInput.value;
       markLoading();
       renderSummary();
+      renderStatus();
       syncClearButton();
       window.clearTimeout(searchTimer);
       searchTimer = window.setTimeout(() => {
@@ -1338,6 +1592,7 @@ function getWebviewHtml(): string {
       markLoading();
       syncClearButton();
       renderSummary();
+      renderStatus();
       vscode.postMessage({
         type: 'search',
         value: '',
@@ -1371,6 +1626,7 @@ function getWebviewHtml(): string {
       markLoading();
       syncFilterButton();
       renderSummary();
+      renderStatus();
       setFilterMenuOpen(false);
       vscode.postMessage({
         type: 'filter',
@@ -1383,6 +1639,7 @@ function getWebviewHtml(): string {
       markLoading();
       syncGitControls();
       renderSummary();
+      renderStatus();
       vscode.postMessage({
         type: 'detectGitChanges',
         checked: detectGitCheckbox.checked,
@@ -1393,6 +1650,7 @@ function getWebviewHtml(): string {
       state.showOnlyChanged = changedOnlyCheckbox.checked;
       markLoading();
       renderSummary();
+      renderStatus();
       vscode.postMessage({
         type: 'changedOnly',
         checked: changedOnlyCheckbox.checked,
@@ -1403,6 +1661,7 @@ function getWebviewHtml(): string {
       state.selectedComparisonBranch = branchSelect.value || null;
       markLoading();
       renderSummary();
+      renderStatus();
       vscode.postMessage({
         type: 'branch',
         value: branchSelect.value,
@@ -1429,6 +1688,7 @@ function getWebviewHtml(): string {
         state.emptyState = message.payload.emptyState;
         state.items = message.payload.items;
         state.isLoading = false;
+        state.loadingProgressPercent = null;
 
         syncControls();
         render();
@@ -1439,12 +1699,35 @@ function getWebviewHtml(): string {
         applyControlsState(message.payload);
         syncControls();
         renderSummary();
+        renderStatus();
         return;
       }
 
       if (message.type === 'refreshing') {
-        markLoading();
+        markLoading(
+          message.payload && typeof message.payload.detail === 'string'
+            ? message.payload.detail
+            : 'Starting refresh',
+          typeof message.payload?.progressPercent === 'number'
+            ? message.payload.progressPercent
+            : null,
+        );
         renderSummary();
+        renderStatus();
+        return;
+      }
+
+      if (message.type === 'loadingStatus') {
+        markLoading(
+          typeof message.payload?.detail === 'string'
+            ? message.payload.detail
+            : 'Refreshing',
+          typeof message.payload?.progressPercent === 'number'
+            ? message.payload.progressPercent
+            : null,
+        );
+        renderSummary();
+        renderStatus();
         return;
       }
 
@@ -1514,8 +1797,12 @@ function getWebviewHtml(): string {
       branchSelect.disabled = !state.detectGitChanges || state.comparisonBranches.length === 0;
     }
 
-    function markLoading() {
+    function markLoading(detail, progressPercent) {
       state.isLoading = true;
+      state.loadingDetail = detail || state.loadingDetail || 'Refreshing';
+      state.loadingProgressPercent = typeof progressPercent === 'number'
+        ? progressPercent
+        : null;
     }
 
     function renderSummary() {
@@ -1530,11 +1817,6 @@ function getWebviewHtml(): string {
         : '';
       const suffix = filterSuffix + changedSuffix + branchSuffix;
 
-      if (state.isLoading) {
-        summary.textContent = 'Updating Supabase objects' + suffix + '...';
-        return;
-      }
-
       if (query) {
         summary.textContent = state.items.length === 1
           ? '1 ' + noun + ' match for "' + query + '"' + suffix
@@ -1545,6 +1827,20 @@ function getWebviewHtml(): string {
       summary.textContent = state.items.length === 1
         ? '1 ' + noun + suffix
         : String(state.items.length) + ' ' + noun + suffix;
+    }
+
+    function renderStatus() {
+      statusBar.hidden = !state.isLoading;
+
+      if (!state.isLoading) {
+        return;
+      }
+
+      const progressPrefix = typeof state.loadingProgressPercent === 'number'
+        ? String(state.loadingProgressPercent) + '% · '
+        : '';
+
+      statusText.textContent = progressPrefix + (state.loadingDetail || 'Refreshing') + '...';
     }
 
     function syncBranchSelect() {
@@ -1582,8 +1878,19 @@ function getWebviewHtml(): string {
       }
     }
 
+    function setSelectedSource(itemId, sourceKey) {
+      if (!itemId || !sourceKey) {
+        return;
+      }
+
+      selectedSourcesByItemId.set(itemId, sourceKey);
+      closeComparisonMenus();
+      render();
+    }
+
     function render() {
       renderSummary();
+      renderStatus();
 
       if (state.items.length === 0 && state.emptyState) {
         content.innerHTML = [
@@ -1603,13 +1910,17 @@ function getWebviewHtml(): string {
         ? ''
         : '<span class="badge ' + item.changeState + '">' + escapeHtml(item.changeState) + '</span>';
       const actions = [];
+      const selectedSource = getSelectedSource(item);
+      const targetOptions = getComparisonTargetsForSource(item, selectedSource);
       const comparisonMenuId = 'comparison-menu-' + hashValue(item.id);
-      const comparisonMenu = renderComparisonMenu(item, comparisonMenuId);
+      const sourceMenuId = 'source-menu-' + hashValue(item.id);
+      const comparisonMenu = renderComparisonMenu(item, selectedSource, targetOptions, comparisonMenuId);
+      const sourceSelector = renderSourceSelector(item, selectedSource, sourceMenuId);
 
-      if (item.primaryAction === 'diff') {
+      if (item.primaryAction === 'diff' && targetOptions.length > 0) {
         actions.push([
           '<span class="diff-action-group">',
-          '  <button class="action-button primary" type="button" data-action="diff" data-id="' + escapeHtml(item.id) + '">Diff</button>',
+          '  <button class="action-button primary" type="button" data-action="diff" data-id="' + escapeHtml(item.id) + '" data-source="' + escapeHtml(selectedSource.key) + '">Diff</button>',
           comparisonMenu
             ? '  <button class="action-button primary menu-toggle" type="button" title="Choose comparison migration" aria-label="Choose comparison migration" data-comparison-toggle="' + escapeHtml(comparisonMenuId) + '">▾</button>'
             : '',
@@ -1641,27 +1952,98 @@ function getWebviewHtml(): string {
         '    ' + badge,
         '  </header>',
         '  <div class="rpc-meta">' + escapeHtml(item.description) + '</div>',
-        '  <div class="rpc-path">' + escapeHtml(item.path) + '</div>',
+        '  <div class="rpc-source-row">',
+        '    <div class="rpc-path">' + escapeHtml(selectedSource.description || item.path) + '</div>',
+        sourceSelector,
+        '  </div>',
         '  <div class="rpc-actions">' + actions.join('') + '</div>',
         '</article>',
       ].join('');
     }
 
-    function renderComparisonMenu(item, menuId) {
-      if (!item.comparisonTargets || item.comparisonTargets.length === 0) {
+    function renderSourceSelector(item, selectedSource, menuId) {
+      const sourceOptions = getDiffableSourceOptions(item);
+
+      if (sourceOptions.length <= 1 || item.primaryAction !== 'diff') {
+        return '';
+      }
+
+      return [
+        '<button class="source-toggle-button" type="button" title="Choose current migration for diff" aria-label="Choose current migration for diff" data-source-toggle="' + escapeHtml(menuId) + '">▾</button>',
+        '<div id="' + escapeHtml(menuId) + '" class="comparison-menu source-menu" data-comparison-menu hidden>',
+        sourceOptions.map((sourceOption) => [
+          '<button type="button" data-id="' + escapeHtml(item.id) + '" data-source-select="' + escapeHtml(sourceOption.key) + '">',
+          '  <span class="comparison-target-label">' + escapeHtml(sourceOption.label) + (sourceOption.key === selectedSource.key ? ' ✓' : '') + '</span>',
+          '  <span class="comparison-target-path">' + escapeHtml(sourceOption.description) + '</span>',
+          '</button>',
+        ].join('')).join(''),
+        '</div>',
+      ].join('');
+    }
+
+    function renderComparisonMenu(item, selectedSource, targetOptions, menuId) {
+      if (!targetOptions || targetOptions.length === 0) {
         return '';
       }
 
       return [
         '<div id="' + escapeHtml(menuId) + '" class="comparison-menu" data-comparison-menu hidden>',
-        item.comparisonTargets.map((target) => [
-          '<button type="button" data-action="diffTarget" data-id="' + escapeHtml(item.id) + '" data-value="' + escapeHtml(target.key) + '">',
+        targetOptions.map((target) => [
+          '<button type="button" data-action="diffTarget" data-id="' + escapeHtml(item.id) + '" data-source="' + escapeHtml(selectedSource.key) + '" data-value="' + escapeHtml(target.key) + '">',
           '  <span class="comparison-target-label">' + escapeHtml(target.label) + '</span>',
           '  <span class="comparison-target-path">' + escapeHtml(target.description) + '</span>',
           '</button>',
         ].join('')).join(''),
         '</div>',
       ].join('');
+    }
+
+    function getSelectedSource(item) {
+      const selectedSourceKey = selectedSourcesByItemId.get(item.id) || item.selectedSourceKey;
+      const sourceOptions = getAvailableSourceOptions(item);
+
+      return sourceOptions.find((sourceOption) => sourceOption.key === selectedSourceKey) || sourceOptions[0];
+    }
+
+    function getDiffableSourceOptions(item) {
+      return getAvailableSourceOptions(item).filter((sourceOption) => (
+        item.comparisonTargets || []
+      ).some((target) => isTargetOlderThanSource(target, sourceOption)));
+    }
+
+    function getAvailableSourceOptions(item) {
+      return item.sourceOptions && item.sourceOptions.length > 0
+        ? item.sourceOptions
+        : [{
+          description: item.path,
+          key: item.selectedSourceKey,
+          order: 0,
+          sortKey: '',
+        }];
+    }
+
+    function getComparisonTargetsForSource(item, selectedSource) {
+      if (!selectedSource || !item.comparisonTargets) {
+        return [];
+      }
+
+      return item.comparisonTargets.filter((target) => isTargetOlderThanSource(target, selectedSource));
+    }
+
+    function isTargetOlderThanSource(target, selectedSource) {
+      if (target.key === selectedSource.key) {
+        return false;
+      }
+
+      if (typeof target.order === 'number' && typeof selectedSource.order === 'number') {
+        return target.order > selectedSource.order;
+      }
+
+      if (target.sortKey && selectedSource.sortKey) {
+        return target.sortKey < selectedSource.sortKey;
+      }
+
+      return false;
     }
 
     function hashValue(value) {
