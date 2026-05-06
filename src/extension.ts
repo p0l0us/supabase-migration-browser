@@ -164,7 +164,7 @@ async function openMigrationDiff(
 
   try {
     const latestVersion = sourceVersionOverride ?? model.latestVersion;
-    const previousVersion = comparisonVersionOverride ?? model.comparisonVersion;
+    const previousVersion = comparisonVersionOverride ?? findDefaultComparisonVersion(model, latestVersion);
 
     if (!previousVersion || !canCompareVersionsInOrder(model, latestVersion, previousVersion)) {
       await openSourceMigration(model, contentProvider);
@@ -714,18 +714,10 @@ function buildSourceOptions(model: MigrationModel): WebviewMigrationVersion[] {
 }
 
 function buildComparisonTargets(model: MigrationModel): WebviewMigrationVersion[] {
-  const targetVersions = [
-    model.comparisonVersion,
-    ...model.allVersions.slice(1),
-  ];
   const targets: WebviewMigrationVersion[] = [];
   const seenKeys = new Set<string>();
 
-  for (const targetVersion of targetVersions) {
-    if (!targetVersion) {
-      continue;
-    }
-
+  for (const targetVersion of getComparisonCandidateVersions(model)) {
     const key = getVersionKey(targetVersion);
 
     if (seenKeys.has(key)) {
@@ -763,14 +755,9 @@ function findComparisonVersionByKey(
   model: MigrationModel,
   versionKey: string,
 ): RpcVersionModel | undefined {
-  const targetVersions = [
-    model.comparisonVersion,
-    ...model.allVersions.slice(1),
-  ];
-
-  return targetVersions.find((targetVersion): targetVersion is RpcVersionModel => (
-    Boolean(targetVersion) && getVersionKey(targetVersion as RpcVersionModel) === versionKey
-  ));
+  return getComparisonCandidateVersions(model).find((targetVersion) =>
+    getVersionKey(targetVersion) === versionKey,
+  );
 }
 
 function findSourceVersionByKey(
@@ -801,6 +788,41 @@ function canCompareVersionsInOrder(
   }
 
   return getVersionSortKey(targetVersion) < getVersionSortKey(sourceVersion);
+}
+
+function findDefaultComparisonVersion(
+  model: MigrationModel,
+  sourceVersion: RpcVersionModel,
+): RpcVersionModel | undefined {
+  return getComparisonCandidateVersions(model).find((targetVersion) =>
+    canCompareVersionsInOrder(model, sourceVersion, targetVersion),
+  );
+}
+
+function getComparisonCandidateVersions(model: MigrationModel): RpcVersionModel[] {
+  const targetVersions = [
+    model.comparisonVersion,
+    ...model.allVersions.slice(1),
+  ];
+  const candidates: RpcVersionModel[] = [];
+  const seenKeys = new Set<string>();
+
+  for (const targetVersion of targetVersions) {
+    if (!targetVersion) {
+      continue;
+    }
+
+    const key = getVersionKey(targetVersion);
+
+    if (seenKeys.has(key)) {
+      continue;
+    }
+
+    seenKeys.add(key);
+    candidates.push(targetVersion);
+  }
+
+  return candidates;
 }
 
 function getWorkspaceVersionOrder(
@@ -1920,7 +1942,7 @@ function getWebviewHtml(): string {
       if (item.primaryAction === 'diff' && targetOptions.length > 0) {
         actions.push([
           '<span class="diff-action-group">',
-          '  <button class="action-button primary" type="button" data-action="diff" data-id="' + escapeHtml(item.id) + '" data-source="' + escapeHtml(selectedSource.key) + '">Diff</button>',
+          '  <button class="action-button primary" type="button" data-action="diffTarget" data-id="' + escapeHtml(item.id) + '" data-source="' + escapeHtml(selectedSource.key) + '" data-value="' + escapeHtml(targetOptions[0].key) + '">Diff</button>',
           comparisonMenu
             ? '  <button class="action-button primary menu-toggle" type="button" title="Choose comparison migration" aria-label="Choose comparison migration" data-comparison-toggle="' + escapeHtml(comparisonMenuId) + '">▾</button>'
             : '',

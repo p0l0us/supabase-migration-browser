@@ -2,7 +2,7 @@
   "name": "browse-supabase-migrations",
   "displayName": "Browse Supabase Migrations",
   "description": "Read-only VS Code view for Supabase RPC functions and views defined in supabase/migrations. Later I'm planning to add features like browsing table definitions, triggers, and more. The extension will be extended as I use it myself, so if you have any feature requests or want to contribute, please let me know!",
-  "version": "0.0.21",
+  "version": "0.0.22",
   "private": true,
   "publisher": "p0l0us",
   "author": "Martin Polehla <polehla@gmail.com>",
