@@ -7,10 +7,10 @@ import {
   extractViewNames,
   filterMigrationModels,
   getFilteredSearchEmptyState,
-  getLatestMigrationRelatedQueriesContent,
+  getMigrationRelatedQueriesContent,
   getEmptyState,
   getSearchEmptyState,
-  hasLatestMigrationRelatedQueries,
+  hasMigrationRelatedQueriesContent,
   hasComparisonMigration,
   normalizeSqlForDiff,
   parseMigrationFileName,
@@ -215,6 +215,29 @@ $$;`,
     expect(models[0]?.previousVersion?.sqlDefinition).toContain('perform 1;');
   });
 
+  it('keeps all object versions ordered newest first', () => {
+    const models = buildMigrationModels([
+      createMigrationFileDescriptor(
+        '20260407120000_create_versioned_rpc.sql',
+        `create or replace function public.versioned_rpc() returns int language sql as $$ select 1; $$;`,
+      ),
+      createMigrationFileDescriptor(
+        '20260409120000_update_versioned_rpc.sql',
+        `create or replace function public.versioned_rpc() returns int language sql as $$ select 3; $$;`,
+      ),
+      createMigrationFileDescriptor(
+        '20260408120000_revise_versioned_rpc.sql',
+        `create or replace function public.versioned_rpc() returns int language sql as $$ select 2; $$;`,
+      ),
+    ]);
+
+    expect(models[0]?.allVersions.map((version) => version.fileName)).toEqual([
+      '20260409120000_update_versioned_rpc.sql',
+      '20260408120000_revise_versioned_rpc.sql',
+      '20260407120000_create_versioned_rpc.sql',
+    ]);
+  });
+
   it('builds view models from create view statements', () => {
     const models = buildMigrationModels([
       createMigrationFileDescriptor(
@@ -401,7 +424,7 @@ $$;`,
     expect(canOpenRpcDiff(models[0]!)).toBe(false);
   });
 
-  it('extracts related queries from the latest migration while excluding function definitions', () => {
+  it('wraps related queries by migration and places version markers between helper queries', () => {
     const models = buildMigrationModels([
       createMigrationFileDescriptor(
         '20260115121000_create_export_user_earnings_csv_rpc.sql',
@@ -421,20 +444,70 @@ revoke all on function public.export_user_earnings_csv(uuid) from public;
 grant execute on function public.export_user_earnings_csv(uuid) to service_role;`,
       ),
     ]);
+    const content = getMigrationRelatedQueriesContent(models[0]!);
 
-    expect(hasLatestMigrationRelatedQueries(models[0]!.latestVersion)).toBe(true);
-    expect(getLatestMigrationRelatedQueriesContent(models[0]!.latestVersion)).toContain(
+    expect(hasMigrationRelatedQueriesContent(models[0]!)).toBe(true);
+    expect(content).toContain(
+      '-- === BEGIN MIGRATION: 20260115121000_create_export_user_earnings_csv_rpc.sql ===',
+    );
+    expect(content).toContain('-- === RPC VERSION MARKER ===');
+    expect(content).toContain('-- RPC: public.export_user_earnings_csv');
+    expect(content).toContain(
+      '-- Migration: 20260115121000_create_export_user_earnings_csv_rpc.sql',
+    );
+    expect(content).toContain(
       "comment on function public.export_user_earnings_csv(uuid)",
     );
-    expect(getLatestMigrationRelatedQueriesContent(models[0]!.latestVersion)).toContain(
+    expect(content).toContain(
       'grant execute on function public.export_user_earnings_csv(uuid) to service_role;',
     );
-    expect(getLatestMigrationRelatedQueriesContent(models[0]!.latestVersion)).not.toContain(
+    expect(content).not.toContain(
       "create or replace function public.export_user_earnings_csv",
+    );
+
+    expect(content.indexOf('drop function if exists public.export_user_earnings_csv(uuid);'))
+      .toBeLessThan(content.indexOf('-- === RPC VERSION MARKER ==='));
+    expect(content.indexOf('-- === RPC VERSION MARKER ==='))
+      .toBeLessThan(content.indexOf("comment on function public.export_user_earnings_csv(uuid)"));
+  });
+
+  it('renders one marker block per migration that updated the selected object', () => {
+    const models = buildMigrationModels([
+      createMigrationFileDescriptor(
+        '20260408120000_create_random_miners_rpc.sql',
+        `create or replace function public.random_miners()
+returns int
+language sql
+as $$
+  select 1;
+$$;`,
+      ),
+      createMigrationFileDescriptor(
+        '20260409120000_update_random_miners_rpc.sql',
+        `comment on function public.random_miners() is 'before update';
+
+create or replace function public.random_miners()
+returns int
+language sql
+as $$
+  select 2;
+$$;
+
+grant execute on function public.random_miners() to authenticated;`,
+      ),
+    ]);
+    const content = getMigrationRelatedQueriesContent(models[0]!);
+
+    expect(content.match(/-- === BEGIN MIGRATION:/g)).toHaveLength(2);
+    expect(content.match(/-- === RPC VERSION MARKER ===/g)).toHaveLength(2);
+    expect(content.indexOf('20260409120000_update_random_miners_rpc.sql'))
+      .toBeLessThan(content.indexOf('20260408120000_create_random_miners_rpc.sql'));
+    expect(content).toContain(
+      '-- === END MIGRATION: 20260408120000_create_random_miners_rpc.sql ===',
     );
   });
 
-  it('returns a helpful message when the latest migration has no related queries', () => {
+  it('keeps marker-only migrations visible in related queries', () => {
     const models = buildMigrationModels([
       createMigrationFileDescriptor(
         '20251212120002_add_random_miners_rpc.sql',
@@ -446,12 +519,36 @@ as $$
 $$;`,
       ),
     ]);
+    const content = getMigrationRelatedQueriesContent(models[0]!);
 
-    expect(hasLatestMigrationRelatedQueries(models[0]!.latestVersion)).toBe(false);
-    expect(getLatestMigrationRelatedQueriesContent(models[0]!.latestVersion)).toContain(
-      'No related queries were found in the latest migration.',
+    expect(hasMigrationRelatedQueriesContent(models[0]!)).toBe(true);
+    expect(content).toContain('-- === RPC VERSION MARKER ===');
+    expect(content).toContain('-- RPC: public.random_miners');
+    expect(content).toContain(
+      '-- === END MIGRATION: 20251212120002_add_random_miners_rpc.sql ===',
     );
   });
+
+  it('uses view markers for related queries of view migrations', () => {
+    const models = buildMigrationModels([
+      createMigrationFileDescriptor(
+        '20260409120000_create_wallet_summary_view.sql',
+        `drop view if exists public.wallet_summary;
+
+create or replace view public.wallet_summary as
+select 'wallet' as label;
+
+comment on view public.wallet_summary is 'Wallet summary';`,
+      ),
+    ]);
+    const content = getMigrationRelatedQueriesContent(models[0]!);
+
+    expect(content).toContain('-- === View VERSION MARKER ===');
+    expect(content).toContain('-- View: public.wallet_summary');
+    expect(content).toContain("comment on view public.wallet_summary is 'Wallet summary';");
+    expect(content).not.toContain('create or replace view public.wallet_summary');
+  });
+
 });
 
 describe('filterMigrationModels', () => {
@@ -496,6 +593,25 @@ describe('filterMigrationModels', () => {
     expect(filterMigrationModels(models, 'wallet', 'all').map((model) => model.kind)).toEqual([
       'rpc',
       'view',
+    ]);
+  });
+
+  it('filters by helper SQL from older object migrations', () => {
+    const models = buildMigrationModels([
+      createMigrationFileDescriptor(
+        '20260408120000_create_wallet_rpc.sql',
+        `create or replace function public.process_wallet_exchange() returns void language sql as $$ select 'wallet'; $$;
+
+grant execute on function public.process_wallet_exchange() to service_role;`,
+      ),
+      createMigrationFileDescriptor(
+        '20260409120000_update_wallet_rpc.sql',
+        `create or replace function public.process_wallet_exchange() returns void language sql as $$ select 'updated'; $$;`,
+      ),
+    ]);
+
+    expect(filterMigrationModels(models, 'service_role').map((model) => model.label)).toEqual([
+      'public.process_wallet_exchange',
     ]);
   });
 });

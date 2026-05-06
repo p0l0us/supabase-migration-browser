@@ -23,6 +23,7 @@ export type MigrationModel = {
   uriString: string;
   workspaceRelativePath: string;
   workspaceFolderName?: string;
+  allVersions: RpcVersionModel[];
   latestVersion: RpcVersionModel;
   previousVersion: RpcVersionModel | null;
   comparisonVersion: RpcVersionModel | null;
@@ -123,6 +124,7 @@ export function buildMigrationModels(
 
   return [...objectVersionsByName.values()]
     .map((objectEntriesForName) => {
+      const allVersions = objectEntriesForName.map(toRpcVersionModel);
       const latestVersion = toRpcVersionModel(objectEntriesForName[0]);
       const normalizedKey = getObjectKey(latestVersion.kind, latestVersion.qualifiedName);
       const baselineVersion = baselineVersionsByName.get(normalizedKey) ?? null;
@@ -148,6 +150,7 @@ export function buildMigrationModels(
         uriString: latestVersion.uriString,
         workspaceRelativePath: latestVersion.workspaceRelativePath,
         workspaceFolderName: latestVersion.workspaceFolderName,
+        allVersions,
         latestVersion,
         previousVersion,
         comparisonVersion,
@@ -195,7 +198,7 @@ export function filterMigrationModels(
       model.fileName,
       model.workspaceRelativePath,
       model.latestVersion.sqlDefinition,
-      getLatestMigrationRelatedQueriesContent(model.latestVersion),
+      getMigrationRelatedQueriesContent(model),
       model.previousVersion?.sqlDefinition ?? '',
     ]
       .join('\n')
@@ -211,17 +214,39 @@ export function hasLatestMigrationRelatedQueries(
   return extractRelatedStatements(version).length > 0;
 }
 
+export function hasMigrationRelatedQueriesContent(
+  model: Pick<MigrationModel, 'allVersions'>,
+): boolean {
+  return model.allVersions.length > 0;
+}
+
+export function getMigrationRelatedQueriesContent(
+  model: Pick<MigrationModel, 'allVersions' | 'kind' | 'label'>,
+): string {
+  const objectLabel = getObjectKindLabel(model.kind);
+  const headerLines = [
+    `-- Related queries for ${objectLabel}: ${model.label}`,
+    '-- Workspace migration versions are listed newest first.',
+    '-- Object definitions are replaced with version markers.',
+    '',
+  ];
+  const migrationBlocks = model.allVersions.map(formatRelatedQueriesVersionBlock);
+
+  return `${headerLines.join('\n')}${migrationBlocks.join('\n\n')}\n`;
+}
+
 export function getLatestMigrationRelatedQueriesContent(
   version: Pick<
     RpcVersionModel,
-    'fileContent' | 'fileName' | 'qualifiedName' | 'sqlDefinition' | 'workspaceRelativePath'
+    'fileContent' | 'fileName' | 'kind' | 'qualifiedName' | 'sqlDefinition' | 'workspaceRelativePath'
   >,
 ): string {
   const relatedStatements = extractRelatedStatements(version);
+  const objectLabel = getObjectKindLabel(version.kind);
 
   if (relatedStatements.length === 0) {
     return [
-      `-- RPC: ${version.qualifiedName}`,
+      `-- ${objectLabel}: ${version.qualifiedName}`,
       `-- Migration: ${version.fileName}`,
       `-- Source: ${version.workspaceRelativePath}`,
       '-- No related queries were found in the latest migration.',
@@ -230,10 +255,10 @@ export function getLatestMigrationRelatedQueriesContent(
   }
 
   const headerLines = [
-    `-- RPC: ${version.qualifiedName}`,
+    `-- ${objectLabel}: ${version.qualifiedName}`,
     `-- Migration: ${version.fileName}`,
     `-- Source: ${version.workspaceRelativePath}`,
-    '-- Related queries from the latest migration (excluding function definitions)',
+    '-- Related queries from the latest migration (excluding object definitions)',
     '',
   ];
 
@@ -495,6 +520,64 @@ function extractRelatedStatements(
   });
 }
 
+function formatRelatedQueriesVersionBlock(version: RpcVersionModel): string {
+  const statements = extractSqlStatements(version.fileContent);
+  const markerLines = formatObjectVersionMarker(version);
+  const contentLines: string[] = [
+    `-- === BEGIN MIGRATION: ${version.fileName} ===`,
+    `-- Source: ${version.workspaceRelativePath}`,
+  ];
+  let markerWasAdded = false;
+
+  for (const statement of statements) {
+    if (statement.type === 'object-definition') {
+      if (isSelectedObjectDefinition(statement, version)) {
+        appendSection(contentLines, markerLines);
+        markerWasAdded = true;
+      }
+
+      continue;
+    }
+
+    appendSection(contentLines, [normalizeSqlForDiff(statement.sql)]);
+  }
+
+  if (!markerWasAdded) {
+    appendSection(contentLines, markerLines);
+  }
+
+  contentLines.push(`-- === END MIGRATION: ${version.fileName} ===`);
+
+  return contentLines.join('\n');
+}
+
+function formatObjectVersionMarker(version: RpcVersionModel): string[] {
+  const objectLabel = getObjectKindLabel(version.kind);
+
+  return [
+    `-- === ${objectLabel} VERSION MARKER ===`,
+    `-- ${objectLabel}: ${version.qualifiedName}`,
+    `-- Migration: ${version.fileName}`,
+    '-- Definition omitted from related queries.',
+    `-- === END ${objectLabel} VERSION MARKER ===`,
+  ];
+}
+
+function appendSection(lines: string[], sectionLines: string[]): void {
+  if (lines.length > 0 && lines[lines.length - 1] !== '') {
+    lines.push('');
+  }
+
+  lines.push(...sectionLines);
+}
+
+function isSelectedObjectDefinition(
+  statement: SqlStatement,
+  version: Pick<RpcVersionModel, 'sqlDefinition'>,
+): boolean {
+  return normalizeSqlForDiff(statement.sql) === normalizeSqlForDiff(version.sqlDefinition);
+}
+
 function extractSqlStatements(content: string): SqlStatement[] {
   const maskedContent = maskSqlComments(content);
   const statements: SqlStatement[] = [];
@@ -573,6 +656,10 @@ function getFilterLabelNoun(kindFilter: MigrationKindFilter): string {
   }
 
   return 'RPC functions or views';
+}
+
+function getObjectKindLabel(kind: MigrationObjectKind): string {
+  return kind === 'view' ? 'View' : 'RPC';
 }
 
 function getRpcChangeState(

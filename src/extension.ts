@@ -2,9 +2,9 @@ import * as vscode from 'vscode';
 
 import {
   canOpenRpcDiff,
-  getLatestMigrationRelatedQueriesContent,
+  getMigrationRelatedQueriesContent,
   hasComparisonMigration,
-  hasLatestMigrationRelatedQueries,
+  hasMigrationRelatedQueriesContent,
   normalizeSqlForDiff,
   type EmptyStateModel,
   type MigrationKindFilter,
@@ -130,7 +130,7 @@ async function openRelatedQueries(
     const document = await vscode.workspace.openTextDocument(
       contentProvider.createDocumentUri(
         `${model.label} related.sql`,
-        getLatestMigrationRelatedQueriesContent(model.latestVersion),
+        getMigrationRelatedQueriesContent(model),
       ),
     );
 
@@ -445,7 +445,7 @@ function buildWebviewState(
         changeState: model.changeState ?? 'unchanged',
         description: buildItemDescription(model, state.includeWorkspaceName),
         hasPrevious: hasComparisonMigration(model),
-        hasRelatedQueries: hasLatestMigrationRelatedQueries(model.latestVersion),
+        hasRelatedQueries: hasMigrationRelatedQueriesContent(model),
         id: model.id,
         kind: model.kind,
         label: model.label,
