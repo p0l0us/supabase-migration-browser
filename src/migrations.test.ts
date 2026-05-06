@@ -286,6 +286,29 @@ $$;`,
     expect(models[0]?.changeState).toBe('new');
   });
 
+  it('does not mark objects as new or updated when git change detection is disabled', () => {
+    const models = buildMigrationModels(
+      [
+        createMigrationFileDescriptor(
+          '20260409120000_add_rpc.sql',
+          `create or replace function public.local_rpc() returns void language sql as $$ select 1; $$;`,
+        ),
+        createMigrationFileDescriptor(
+          '20260410120000_update_rpc.sql',
+          `create or replace function public.local_rpc() returns void language sql as $$ select 2; $$;`,
+        ),
+      ],
+      [],
+      { detectChanges: false },
+    );
+
+    expect(models[0]?.changeState).toBeNull();
+    expect(models[0]?.comparisonVersion).toMatchObject({
+      fileName: '20260409120000_add_rpc.sql',
+    });
+    expect(canOpenRpcDiff(models[0]!)).toBe(true);
+  });
+
   it('marks rpc entries as updated when their latest sql differs from the branch base', () => {
     const latestFile = createMigrationFileDescriptor(
       '20260409120000_update_rpc.sql',
@@ -409,6 +432,36 @@ $$;`,
     );
 
     expect(hasComparisonMigration(models[0]!)).toBe(true);
+    expect(canOpenRpcDiff(models[0]!)).toBe(true);
+  });
+
+  it('diffs updated objects against the branch base even when an earlier workspace migration exists', () => {
+    const models = buildMigrationModels(
+      [
+        createMigrationFileDescriptor(
+          '20260410120000_revise_updated_view.sql',
+          `create or replace view public.updated_view as select 3 as value;`,
+        ),
+        createMigrationFileDescriptor(
+          '20260409120000_update_view.sql',
+          `create or replace view public.updated_view as select 2 as value;`,
+        ),
+      ],
+      [
+        createMigrationFileDescriptor(
+          '20260401120000_create_updated_view.sql',
+          `create or replace view public.updated_view as select 1 as value;`,
+        ),
+      ],
+    );
+
+    expect(models[0]?.changeState).toBe('updated');
+    expect(models[0]?.previousVersion).toMatchObject({
+      fileName: '20260409120000_update_view.sql',
+    });
+    expect(models[0]?.comparisonVersion).toMatchObject({
+      fileName: '20260401120000_create_updated_view.sql',
+    });
     expect(canOpenRpcDiff(models[0]!)).toBe(true);
   });
 
@@ -596,6 +649,43 @@ describe('filterMigrationModels', () => {
     ]);
   });
 
+  it('filters to new and updated objects when changed-only mode is enabled', () => {
+    const models = buildMigrationModels(
+      [
+        createMigrationFileDescriptor(
+          '20260409120000_alpha.sql',
+          `create or replace function public.alpha_rpc() returns void language sql as $$ select 1; $$;`,
+        ),
+        createMigrationFileDescriptor(
+          '20260409130000_beta.sql',
+          `create or replace view public.beta_view as select 2 as value;`,
+        ),
+        createMigrationFileDescriptor(
+          '20260409140000_gamma.sql',
+          `create or replace function public.gamma_rpc() returns void language sql as $$ select 3; $$;`,
+        ),
+      ],
+      [
+        createMigrationFileDescriptor(
+          '20260401130000_beta.sql',
+          `create or replace view public.beta_view as select 1 as value;`,
+        ),
+        createMigrationFileDescriptor(
+          '20260401140000_gamma.sql',
+          `create or replace function public.gamma_rpc() returns void language sql as $$ select 3; $$;`,
+        ),
+      ],
+    );
+
+    expect(filterMigrationModels(models, '', 'all', true).map((model) => model.label)).toEqual([
+      'public.alpha_rpc',
+      'public.beta_view',
+    ]);
+    expect(filterMigrationModels(models, '', 'views', true).map((model) => model.label)).toEqual([
+      'public.beta_view',
+    ]);
+  });
+
   it('filters by helper SQL from older object migrations', () => {
     const models = buildMigrationModels([
       createMigrationFileDescriptor(
@@ -658,6 +748,14 @@ describe('getSearchEmptyState', () => {
       message: 'No Supabase views matched "wallet".',
     });
   });
+
+  it('returns changed-only guidance for filtered searches when unchanged objects are hidden', () => {
+    expect(getFilteredSearchEmptyState('wallet', 'views', true)).toEqual({
+      label: 'No views match the search',
+      message:
+        'No Supabase views matched "wallet". Clear Show only new or updated to include unchanged objects in the search.',
+    });
+  });
 });
 
 describe('getEmptyState', () => {
@@ -699,6 +797,21 @@ describe('getEmptyState', () => {
       label: 'No Supabase views found',
       message:
         'No Supabase views matched the current type filter. Choose All to show every discovered RPC and view.',
+    });
+  });
+
+  it('returns a changed-only empty state when no objects changed against the selected branch', () => {
+    expect(
+      getEmptyState({
+        hasMigrationsFolder: true,
+        hasSqlFiles: true,
+        hasFilteredItems: false,
+        showOnlyChanged: true,
+      }),
+    ).toEqual({
+      label: 'No new or updated RPC functions or views found',
+      message:
+        'No Supabase RPC functions or views changed compared with the selected branch. Clear Show only new or updated to browse unchanged objects too.',
     });
   });
 

@@ -88,6 +88,10 @@ type RpcEntry = {
   workspaceFolderName?: string;
 };
 
+type BuildMigrationModelsOptions = {
+  detectChanges?: boolean;
+};
+
 export function parseMigrationFileName(
   fileName: string,
 ): MigrationTimestamp {
@@ -109,10 +113,14 @@ export function parseMigrationFileName(
 export function buildMigrationModels(
   files: MigrationFileDescriptor[],
   baseFiles: MigrationFileDescriptor[] = [],
+  options: BuildMigrationModelsOptions = {},
 ): MigrationModel[] {
+  const detectChanges = options.detectChanges ?? true;
   const objectEntries = files.flatMap(extractObjectEntries);
   const objectVersionsByName = new Map<string, RpcEntry[]>();
-  const baselineVersionsByName = buildLatestObjectVersionIndex(baseFiles);
+  const baselineVersionsByName = detectChanges
+    ? buildLatestObjectVersionIndex(baseFiles)
+    : new Map<string, RpcVersionModel>();
 
   for (const objectEntry of objectEntries.sort(compareRpcEntriesNewestFirst)) {
     const normalizedKey = getObjectKey(objectEntry.kind, objectEntry.qualifiedName);
@@ -127,15 +135,18 @@ export function buildMigrationModels(
       const allVersions = objectEntriesForName.map(toRpcVersionModel);
       const latestVersion = toRpcVersionModel(objectEntriesForName[0]);
       const normalizedKey = getObjectKey(latestVersion.kind, latestVersion.qualifiedName);
-      const baselineVersion = baselineVersionsByName.get(normalizedKey) ?? null;
+      const baselineVersion = detectChanges
+        ? baselineVersionsByName.get(normalizedKey) ?? null
+        : null;
       const previousVersion = objectEntriesForName[1]
         ? toRpcVersionModel(objectEntriesForName[1])
         : null;
-      const comparisonVersion = previousVersion ?? baselineVersion;
-      const changeState = getRpcChangeState(
-        latestVersion,
-        baselineVersion,
-      );
+      const comparisonVersion = detectChanges
+        ? baselineVersion ?? previousVersion
+        : previousVersion;
+      const changeState = detectChanges
+        ? getRpcChangeState(latestVersion, baselineVersion)
+        : null;
 
       return {
         id: `${latestVersion.uriString}#${latestVersion.kind}:${normalizeFunctionName(latestVersion.qualifiedName)}`,
@@ -180,18 +191,22 @@ export function filterMigrationModels(
   models: MigrationModel[],
   query: string,
   kindFilter: MigrationKindFilter = 'all',
+  showOnlyChanged = false,
 ): MigrationModel[] {
   const normalizedQuery = query.trim().toLowerCase();
   const selectedKind = getObjectKindForFilter(kindFilter);
   const kindFilteredModels = kindFilter === 'all'
     ? models
     : models.filter((model) => model.kind === selectedKind);
+  const changeFilteredModels = showOnlyChanged
+    ? kindFilteredModels.filter((model) => model.changeState !== null)
+    : kindFilteredModels;
 
   if (!normalizedQuery) {
-    return kindFilteredModels;
+    return changeFilteredModels;
   }
 
-  return kindFilteredModels.filter((model) => {
+  return changeFilteredModels.filter((model) => {
     const haystack = [
       model.kind,
       model.label,
@@ -268,18 +283,22 @@ export function getLatestMigrationRelatedQueriesContent(
 }
 
 export function getSearchEmptyState(query: string): EmptyStateModel {
-  return getFilteredSearchEmptyState(query, 'all');
+  return getFilteredSearchEmptyState(query, 'all', false);
 }
 
 export function getFilteredSearchEmptyState(
   query: string,
   kindFilter: MigrationKindFilter,
+  showOnlyChanged = false,
 ): EmptyStateModel {
   const labelNoun = getFilterLabelNoun(kindFilter);
+  const changedOnlyMessage = showOnlyChanged
+    ? ' Clear Show only new or updated to include unchanged objects in the search.'
+    : '';
 
   return {
     label: `No ${labelNoun} match the search`,
-    message: `No Supabase ${labelNoun} matched "${query}".`,
+    message: `No Supabase ${labelNoun} matched "${query}".${changedOnlyMessage}`,
   };
 }
 
@@ -309,6 +328,7 @@ export function getEmptyState(props: {
   hasSqlFiles: boolean;
   hasFilteredItems?: boolean;
   kindFilter?: MigrationKindFilter;
+  showOnlyChanged?: boolean;
 }): EmptyStateModel | null {
   const kindFilter = props.kindFilter ?? 'all';
   const hasFilteredItems = props.hasFilteredItems ?? props.hasSqlFiles;
@@ -322,6 +342,15 @@ export function getEmptyState(props: {
       label: 'No supabase/migrations folder found',
       message:
         'Open a workspace that contains supabase/migrations to browse Supabase RPC functions here.',
+    };
+  }
+
+  if (props.hasSqlFiles && props.showOnlyChanged) {
+    const filterNoun = getFilterLabelNoun(kindFilter);
+
+    return {
+      label: `No new or updated ${filterNoun} found`,
+      message: `No Supabase ${filterNoun} changed compared with the selected branch. Clear Show only new or updated to browse unchanged objects too.`,
     };
   }
 

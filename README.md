@@ -8,7 +8,13 @@ This standalone VS Code extension adds a read-only Supabase RPC and view browser
 - Extracts RPC function and view names exactly as they are declared in SQL.
 - Shows each RPC or view only once, using the newest migration that defines or replaces it.
 - Filters the list by all objects, RPCs only, or views only.
-- Compares the current workspace against the current branch base so the list knows which objects were changed in this branch.
+- Keeps Git change detection disabled by default so initial browsing does not run Git comparison checks.
+- Provides a `Detect git changes` checkbox that enables local Git comparison against remote-tracking refs.
+- Shows only new or updated RPCs/views when Git change detection is enabled, with a checkbox to include unchanged objects when needed.
+- Lists origin branches after Git change detection is enabled so you can choose which target branch to compare migrations against.
+- Selects the current branch base by default when that metadata is available, otherwise falls back to the origin default branch.
+- Compares the current workspace against the selected target branch so the list knows which objects were changed in this branch.
+- Automatically refreshes and reselects the branch base when the current Git branch changes and Git change detection is enabled.
 - Sorts branch-changed objects to the top of the list, then keeps alphabetical ordering within each change group.
 - Displays the timestamp of the latest migration that edited the object.
 - Uses yellow rows for updated objects and green rows for newly introduced objects while leaving unchanged objects with the default styling.
@@ -18,7 +24,8 @@ This standalone VS Code extension adds a read-only Supabase RPC and view browser
 - Shows inline row actions for opening the latest migration file, the previous migration defining the object, and a generated related-queries view.
 - The related-queries view groups helper SQL by migration, wraps each migration block with begin/end comments, and inserts RPC/view version markers where each object definition appears among the helper queries.
 - Keeps a permanent search field pinned at the top of the sidebar and still lets the toolbar search action focus that field.
-- Adds a refresh action to reload the list.
+- Makes search and RPC/view filtering respect the active changed-only and comparison-branch controls.
+- Adds a refresh action to reload the list and shows a loading state while refreshed data is being read.
 - Shows a clear empty state when the migrations folder is missing or no RPCs/views are defined.
 
 ## Scope

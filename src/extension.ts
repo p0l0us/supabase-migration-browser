@@ -44,7 +44,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(
       REFRESH_MIGRATIONS_COMMAND,
       async (): Promise<void> => {
-        await provider.refresh();
+        await viewProvider.refresh();
       },
     ),
     vscode.commands.registerCommand(
@@ -84,6 +84,8 @@ export function activate(context: vscode.ExtensionContext): void {
       },
     ),
   );
+
+  context.subscriptions.push(registerGitStateRefresh(viewProvider));
 
   void provider.refresh();
 }
@@ -238,6 +240,20 @@ class SupabaseMigrationsViewProvider
     await this.postFocusSearch();
   }
 
+  async refresh(): Promise<void> {
+    await this.postRefreshing();
+    await this.provider.refresh();
+  }
+
+  async refreshForCurrentBranchChange(): Promise<void> {
+    if (!this.provider.getDetectGitChanges()) {
+      return;
+    }
+
+    await this.postRefreshing();
+    await this.provider.refreshForCurrentBranchChange();
+  }
+
   private async handleMessage(message: unknown): Promise<void> {
     if (!message || typeof message !== 'object') {
       return;
@@ -248,6 +264,7 @@ class SupabaseMigrationsViewProvider
       id?: string;
       type?: string;
       value?: string;
+      checked?: boolean;
     };
 
     if (typedMessage.type === 'ready') {
@@ -262,6 +279,21 @@ class SupabaseMigrationsViewProvider
 
     if (typedMessage.type === 'filter' && isMigrationKindFilter(typedMessage.value)) {
       await this.provider.setKindFilter(typedMessage.value);
+      return;
+    }
+
+    if (typedMessage.type === 'detectGitChanges' && typeof typedMessage.checked === 'boolean') {
+      await this.provider.setDetectGitChanges(typedMessage.checked);
+      return;
+    }
+
+    if (typedMessage.type === 'changedOnly' && typeof typedMessage.checked === 'boolean') {
+      await this.provider.setShowOnlyChanged(typedMessage.checked);
+      return;
+    }
+
+    if (typedMessage.type === 'branch' && typeof typedMessage.value === 'string') {
+      await this.provider.setComparisonBranch(typedMessage.value);
       return;
     }
 
@@ -314,9 +346,19 @@ class SupabaseMigrationsViewProvider
         state,
         this.provider.getSearchQuery(),
         this.provider.getKindFilter(),
+        this.provider.getDetectGitChanges(),
+        this.provider.getShowOnlyChanged(),
       ),
     });
     await this.postFocusSearch();
+  }
+
+  private async postRefreshing(): Promise<void> {
+    if (!this.view) {
+      return;
+    }
+
+    await this.view.webview.postMessage({ type: 'refreshing' });
   }
 
   private async postFocusSearch(): Promise<void> {
@@ -327,6 +369,107 @@ class SupabaseMigrationsViewProvider
     this.shouldFocusSearch = false;
     await this.view.webview.postMessage({ type: 'focusSearch' });
   }
+}
+
+type GitExtension = {
+  getAPI(version: 1): GitApi;
+};
+
+type GitApi = {
+  readonly repositories: GitRepository[];
+  readonly onDidOpenRepository: vscode.Event<GitRepository>;
+  readonly onDidCloseRepository: vscode.Event<GitRepository>;
+};
+
+type GitRepository = {
+  readonly rootUri: vscode.Uri;
+  readonly state: {
+    readonly HEAD?: {
+      readonly commit?: string;
+      readonly name?: string;
+    };
+    readonly onDidChange: vscode.Event<void>;
+  };
+};
+
+function registerGitStateRefresh(
+  viewProvider: SupabaseMigrationsViewProvider,
+): vscode.Disposable {
+  const disposables: vscode.Disposable[] = [];
+
+  void registerGitStateRefreshAsync(viewProvider, disposables);
+
+  return new vscode.Disposable(() => {
+    vscode.Disposable.from(...disposables).dispose();
+  });
+}
+
+async function registerGitStateRefreshAsync(
+  viewProvider: SupabaseMigrationsViewProvider,
+  disposables: vscode.Disposable[],
+): Promise<void> {
+  const gitExtension = vscode.extensions.getExtension<GitExtension>('vscode.git');
+
+  if (!gitExtension) {
+    return;
+  }
+
+  const git = gitExtension.isActive
+    ? gitExtension.exports
+    : await gitExtension.activate();
+  const gitApi = git.getAPI(1);
+  const repositoryDisposables = new Map<string, vscode.Disposable>();
+  const headNames = new Map<string, string | undefined>();
+
+  const registerRepository = (repository: GitRepository) => {
+    const repositoryKey = repository.rootUri.toString();
+
+    if (repositoryDisposables.has(repositoryKey)) {
+      return;
+    }
+
+    headNames.set(repositoryKey, repository.state.HEAD?.name);
+
+    repositoryDisposables.set(
+      repositoryKey,
+      repository.state.onDidChange(() => {
+        const previousHeadName = headNames.get(repositoryKey);
+        const currentHeadName = repository.state.HEAD?.name;
+
+        if (previousHeadName === currentHeadName) {
+          return;
+        }
+
+        headNames.set(repositoryKey, currentHeadName);
+        void viewProvider.refreshForCurrentBranchChange();
+      }),
+    );
+  };
+
+  const unregisterRepository = (repository: GitRepository) => {
+    const repositoryKey = repository.rootUri.toString();
+
+    repositoryDisposables.get(repositoryKey)?.dispose();
+    repositoryDisposables.delete(repositoryKey);
+    headNames.delete(repositoryKey);
+  };
+
+  for (const repository of gitApi.repositories) {
+    registerRepository(repository);
+  }
+
+  disposables.push(
+    gitApi.onDidOpenRepository(registerRepository),
+    gitApi.onDidCloseRepository(unregisterRepository),
+    new vscode.Disposable(() => {
+      for (const disposable of repositoryDisposables.values()) {
+        disposable.dispose();
+      }
+
+      repositoryDisposables.clear();
+      headNames.clear();
+    }),
+  );
 }
 
 async function openRpcVersion(
@@ -424,18 +567,30 @@ type WebviewMigrationItem = {
 };
 
 type WebviewState = {
+  comparisonBranches: Array<{
+    isDefault: boolean;
+    label: string;
+    ref: string;
+  }>;
+  detectGitChanges: boolean;
   emptyState: EmptyStateModel | null;
   items: WebviewMigrationItem[];
   kindFilter: MigrationKindFilter;
   searchQuery: string;
+  selectedComparisonBranch: string | null;
+  showOnlyChanged: boolean;
 };
 
 function buildWebviewState(
   state: ProviderState,
   searchQuery: string,
   kindFilter: MigrationKindFilter,
+  detectGitChanges: boolean,
+  showOnlyChanged: boolean,
 ): WebviewState {
   return {
+    comparisonBranches: state.comparisonBranches,
+    detectGitChanges,
     emptyState: state.emptyState,
     items: state.items.map((model) => {
       const canDiff = canOpenRpcDiff(model);
@@ -455,6 +610,8 @@ function buildWebviewState(
     }),
     kindFilter,
     searchQuery,
+    selectedComparisonBranch: state.selectedComparisonBranch,
+    showOnlyChanged,
   };
 }
 
@@ -474,11 +631,18 @@ function buildItemDescription(
 
   if (model.changeState === 'updated') {
     descriptionParts.push('updated');
+    descriptionParts.push(formatPreviousVersionCount(model.allVersions.length - 1));
   }
 
   descriptionParts.push(model.description);
 
   return descriptionParts.join(' · ');
+}
+
+function formatPreviousVersionCount(previousVersionCount: number): string {
+  return previousVersionCount === 1
+    ? '1 previous migration version'
+    : `${previousVersionCount} previous migration versions`;
 }
 
 function getWebviewHtml(): string {
@@ -517,7 +681,8 @@ function getWebviewHtml(): string {
     }
 
     button,
-    input {
+    input,
+    select {
       font: inherit;
     }
 
@@ -567,8 +732,59 @@ function getWebviewHtml(): string {
       -webkit-appearance: none;
     }
 
+    .branch-select {
+      width: 100%;
+      min-width: 0;
+      min-height: 30px;
+      padding: 6px 8px;
+      border: 1px solid var(--vscode-dropdown-border, var(--vscode-input-border, transparent));
+      border-radius: 8px;
+      background: var(--vscode-dropdown-background, var(--vscode-input-background));
+      color: var(--vscode-dropdown-foreground, var(--vscode-input-foreground));
+      outline: none;
+    }
+
+    .branch-select:focus,
     .search-input:focus {
       border-color: var(--vscode-focusBorder);
+    }
+
+    .controls-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .git-control[hidden] {
+      display: none;
+    }
+
+    .checkbox-label,
+    .branch-label {
+      display: flex;
+      min-width: 0;
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+    }
+
+    .checkbox-label {
+      align-items: center;
+      gap: 8px;
+    }
+
+    .checkbox-label input {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+      accent-color: var(--vscode-button-background);
+    }
+
+    .branch-label {
+      display: grid;
+      width: 100%;
+      gap: 4px;
     }
 
     .toolbar-button,
@@ -838,6 +1054,20 @@ function getWebviewHtml(): string {
           </div>
         </div>
       </div>
+      <div class="controls-row">
+        <label class="checkbox-label">
+          <input id="detect-git-checkbox" type="checkbox">
+          <span>Detect git changes</span>
+        </label>
+        <label id="changed-only-label" class="checkbox-label git-control" hidden>
+          <input id="changed-only-checkbox" type="checkbox">
+          <span>Show only new or updated</span>
+        </label>
+        <label id="branch-label" class="branch-label git-control" for="branch-select" hidden>
+          Compare against origin branch
+          <select id="branch-select" class="branch-select" aria-label="Compare against origin branch"></select>
+        </label>
+      </div>
       <div id="summary" class="summary">Loading Supabase objects...</div>
     </header>
     <main id="content" class="content"></main>
@@ -849,13 +1079,23 @@ function getWebviewHtml(): string {
     const clearButton = document.getElementById('clear-button');
     const filterButton = document.getElementById('filter-button');
     const filterMenu = document.getElementById('filter-menu');
+    const detectGitCheckbox = document.getElementById('detect-git-checkbox');
+    const changedOnlyLabel = document.getElementById('changed-only-label');
+    const changedOnlyCheckbox = document.getElementById('changed-only-checkbox');
+    const branchLabel = document.getElementById('branch-label');
+    const branchSelect = document.getElementById('branch-select');
     const summary = document.getElementById('summary');
     const content = document.getElementById('content');
     const state = {
+      comparisonBranches: [],
+      detectGitChanges: false,
       emptyState: null,
       items: [],
       kindFilter: 'all',
       searchQuery: '',
+      selectedComparisonBranch: null,
+      showOnlyChanged: false,
+      isLoading: true,
     };
     let searchTimer = undefined;
 
@@ -886,6 +1126,7 @@ function getWebviewHtml(): string {
 
     searchInput.addEventListener('input', () => {
       state.searchQuery = searchInput.value;
+      markLoading();
       renderSummary();
       syncClearButton();
       window.clearTimeout(searchTimer);
@@ -900,6 +1141,7 @@ function getWebviewHtml(): string {
     clearButton.addEventListener('click', () => {
       searchInput.value = '';
       state.searchQuery = '';
+      markLoading();
       syncClearButton();
       renderSummary();
       vscode.postMessage({
@@ -932,12 +1174,44 @@ function getWebviewHtml(): string {
       }
 
       state.kindFilter = value;
+      markLoading();
       syncFilterButton();
       renderSummary();
       setFilterMenuOpen(false);
       vscode.postMessage({
         type: 'filter',
         value,
+      });
+    });
+
+    detectGitCheckbox.addEventListener('change', () => {
+      state.detectGitChanges = detectGitCheckbox.checked;
+      markLoading();
+      syncGitControls();
+      renderSummary();
+      vscode.postMessage({
+        type: 'detectGitChanges',
+        checked: detectGitCheckbox.checked,
+      });
+    });
+
+    changedOnlyCheckbox.addEventListener('change', () => {
+      state.showOnlyChanged = changedOnlyCheckbox.checked;
+      markLoading();
+      renderSummary();
+      vscode.postMessage({
+        type: 'changedOnly',
+        checked: changedOnlyCheckbox.checked,
+      });
+    });
+
+    branchSelect.addEventListener('change', () => {
+      state.selectedComparisonBranch = branchSelect.value || null;
+      markLoading();
+      renderSummary();
+      vscode.postMessage({
+        type: 'branch',
+        value: branchSelect.value,
       });
     });
 
@@ -955,18 +1229,34 @@ function getWebviewHtml(): string {
       const message = event.data;
 
       if (message.type === 'state') {
+        state.comparisonBranches = message.payload.comparisonBranches;
+        state.detectGitChanges = message.payload.detectGitChanges;
         state.emptyState = message.payload.emptyState;
         state.items = message.payload.items;
         state.kindFilter = message.payload.kindFilter;
         state.searchQuery = message.payload.searchQuery;
+        state.selectedComparisonBranch = message.payload.selectedComparisonBranch;
+        state.showOnlyChanged = message.payload.showOnlyChanged;
+        state.isLoading = false;
 
         if (searchInput.value !== state.searchQuery) {
           searchInput.value = state.searchQuery;
         }
 
+        detectGitCheckbox.checked = state.detectGitChanges;
+        changedOnlyCheckbox.checked = state.showOnlyChanged;
+
         syncClearButton();
-  syncFilterButton();
+        syncFilterButton();
+        syncGitControls();
+        syncBranchSelect();
         render();
+        return;
+      }
+
+      if (message.type === 'refreshing') {
+        markLoading();
+        renderSummary();
         return;
       }
 
@@ -1002,23 +1292,56 @@ function getWebviewHtml(): string {
       syncFilterButton();
     }
 
+    function syncGitControls() {
+      changedOnlyLabel.hidden = !state.detectGitChanges;
+      branchLabel.hidden = !state.detectGitChanges;
+      changedOnlyCheckbox.disabled = !state.detectGitChanges;
+      branchSelect.disabled = !state.detectGitChanges || state.comparisonBranches.length === 0;
+    }
+
+    function markLoading() {
+      state.isLoading = true;
+    }
+
     function renderSummary() {
       const query = state.searchQuery.trim();
       const noun = getCountNoun(state.kindFilter, state.items.length);
       const filterSuffix = state.kindFilter === 'all'
         ? ''
         : ' · ' + getKindFilterLabel(state.kindFilter) + ' filter';
+      const changedSuffix = state.detectGitChanges && state.showOnlyChanged ? ' · changed only' : '';
+      const branchSuffix = state.detectGitChanges && state.selectedComparisonBranch
+        ? ' · compared with ' + state.selectedComparisonBranch
+        : '';
+      const suffix = filterSuffix + changedSuffix + branchSuffix;
+
+      if (state.isLoading) {
+        summary.textContent = 'Updating Supabase objects' + suffix + '...';
+        return;
+      }
 
       if (query) {
         summary.textContent = state.items.length === 1
-          ? '1 ' + noun + ' match for "' + query + '"' + filterSuffix
-          : String(state.items.length) + ' ' + noun + ' match for "' + query + '"' + filterSuffix;
+          ? '1 ' + noun + ' match for "' + query + '"' + suffix
+          : String(state.items.length) + ' ' + noun + ' match for "' + query + '"' + suffix;
         return;
       }
 
       summary.textContent = state.items.length === 1
-        ? '1 ' + noun + filterSuffix
-        : String(state.items.length) + ' ' + noun + filterSuffix;
+        ? '1 ' + noun + suffix
+        : String(state.items.length) + ' ' + noun + suffix;
+    }
+
+    function syncBranchSelect() {
+      branchSelect.innerHTML = state.comparisonBranches.map((branch) => {
+        const selected = branch.ref === state.selectedComparisonBranch ? ' selected' : '';
+        const defaultSuffix = branch.isDefault ? ' (base)' : '';
+
+        return '<option value="' + escapeHtml(branch.ref) + '"' + selected + '>' +
+          escapeHtml(branch.label + defaultSuffix) +
+          '</option>';
+      }).join('');
+      branchSelect.disabled = !state.detectGitChanges || state.comparisonBranches.length === 0;
     }
 
     function render() {
@@ -1117,6 +1440,8 @@ function getWebviewHtml(): string {
 
     syncClearButton();
     syncFilterButton();
+    syncGitControls();
+    syncBranchSelect();
     render();
     vscode.postMessage({ type: 'ready' });
   </script>

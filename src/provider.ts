@@ -16,10 +16,19 @@ import {
 } from './migrations';
 
 const execFileAsync = promisify(execFile);
+export type ComparisonBranchModel = {
+  isDefault: boolean;
+  label: string;
+  ref: string;
+};
+
 export type ProviderState = {
+  comparisonBranches: ComparisonBranchModel[];
+  detectGitChanges: boolean;
   emptyState: EmptyStateModel | null;
   includeWorkspaceName: boolean;
   items: MigrationModel[];
+  selectedComparisonBranch: string | null;
 };
 
 export class SupabaseMigrationsProvider
@@ -27,8 +36,12 @@ export class SupabaseMigrationsProvider
   private readonly stateEmitter = new vscode.EventEmitter<ProviderState>();
   private readonly watcher: vscode.FileSystemWatcher;
   private cachedState?: ProviderState;
+  private comparisonBranch?: string;
+  private currentBranch?: string | null;
+  private detectGitChanges = false;
   private kindFilter: MigrationKindFilter = 'all';
   private searchQuery = '';
+  private showOnlyChanged = false;
   private stateRequestId = 0;
 
   readonly onDidChangeState = this.stateEmitter.event;
@@ -57,6 +70,15 @@ export class SupabaseMigrationsProvider
     await this.loadState(true, true);
   }
 
+  async refreshForCurrentBranchChange(): Promise<void> {
+    if (!this.detectGitChanges) {
+      return;
+    }
+
+    this.comparisonBranch = undefined;
+    await this.refresh();
+  }
+
   async setSearchQuery(searchQuery: string): Promise<void> {
     this.searchQuery = searchQuery;
     await this.loadState(true, true);
@@ -67,12 +89,41 @@ export class SupabaseMigrationsProvider
     await this.loadState(true, true);
   }
 
+  async setComparisonBranch(comparisonBranch: string): Promise<void> {
+    this.comparisonBranch = comparisonBranch;
+    await this.loadState(true, true);
+  }
+
+  async setDetectGitChanges(detectGitChanges: boolean): Promise<void> {
+    this.detectGitChanges = detectGitChanges;
+
+    if (!detectGitChanges) {
+      this.comparisonBranch = undefined;
+      this.currentBranch = undefined;
+    }
+
+    await this.loadState(true, true);
+  }
+
+  async setShowOnlyChanged(showOnlyChanged: boolean): Promise<void> {
+    this.showOnlyChanged = showOnlyChanged;
+    await this.loadState(true, true);
+  }
+
   getKindFilter(): MigrationKindFilter {
     return this.kindFilter;
   }
 
+  getDetectGitChanges(): boolean {
+    return this.detectGitChanges;
+  }
+
   getSearchQuery(): string {
     return this.searchQuery;
+  }
+
+  getShowOnlyChanged(): boolean {
+    return this.showOnlyChanged;
   }
 
   async getState(force = false): Promise<ProviderState> {
@@ -104,13 +155,40 @@ export class SupabaseMigrationsProvider
     const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
     const files: MigrationFileDescriptor[] = [];
     const baseFiles: MigrationFileDescriptor[] = [];
+    const currentBranch = this.detectGitChanges && workspaceFolders[0]
+      ? await getCurrentBranch(workspaceFolders[0])
+      : null;
+
+    if (this.currentBranch !== undefined && this.currentBranch !== currentBranch) {
+      this.comparisonBranch = undefined;
+    }
+
+    this.currentBranch = currentBranch;
+
+    const comparisonBranches = this.detectGitChanges && workspaceFolders[0]
+      ? await getOriginBranches(workspaceFolders[0])
+      : [];
+    const selectedComparisonBranch = this.detectGitChanges
+      ? await resolveSelectedComparisonBranch(
+        workspaceFolders[0],
+        comparisonBranches,
+        this.comparisonBranch,
+      )
+      : null;
+
+    this.comparisonBranch = selectedComparisonBranch ?? undefined;
+
     let hasMigrationsFolder = false;
 
     for (const workspaceFolder of workspaceFolders) {
-      const workspaceBaseFiles = await getBaseMigrationFiles(
-        workspaceFolder,
-      );
-      baseFiles.push(...workspaceBaseFiles);
+      if (this.detectGitChanges) {
+        const workspaceBaseFiles = await getBaseMigrationFiles(
+          workspaceFolder,
+          selectedComparisonBranch,
+        );
+        baseFiles.push(...workspaceBaseFiles);
+      }
+
       const migrationFolderUri = vscode.Uri.joinPath(
         workspaceFolder.uri,
         'supabase',
@@ -150,32 +228,48 @@ export class SupabaseMigrationsProvider
       }
     }
 
-    const items = buildMigrationModels(files, baseFiles);
-    const filteredItems = filterMigrationModels(items, this.searchQuery, this.kindFilter);
+    const items = buildMigrationModels(files, baseFiles, {
+      detectChanges: this.detectGitChanges,
+    });
+    const filteredItems = filterMigrationModels(
+      items,
+      this.searchQuery,
+      this.kindFilter,
+      this.detectGitChanges && this.showOnlyChanged,
+    );
 
     const emptyState = this.searchQuery.trim()
       ? filteredItems.length === 0
-        ? getFilteredSearchEmptyState(this.searchQuery.trim(), this.kindFilter)
+        ? getFilteredSearchEmptyState(
+          this.searchQuery.trim(),
+          this.kindFilter,
+          this.detectGitChanges && this.showOnlyChanged,
+        )
         : null
       : getEmptyState({
         hasMigrationsFolder,
         hasSqlFiles: items.length > 0,
         hasFilteredItems: filteredItems.length > 0,
         kindFilter: this.kindFilter,
+        showOnlyChanged: this.detectGitChanges && this.showOnlyChanged,
       });
 
     return {
+      comparisonBranches,
+      detectGitChanges: this.detectGitChanges,
       emptyState,
       includeWorkspaceName: workspaceFolders.length > 1,
       items: filteredItems,
+      selectedComparisonBranch,
     };
   }
 }
 
 async function getBaseMigrationFiles(
   workspaceFolder: vscode.WorkspaceFolder,
+  comparisonRef: string | null,
 ): Promise<MigrationFileDescriptor[]> {
-  const mergeBase = await resolveMergeBase(workspaceFolder);
+  const mergeBase = await resolveMergeBase(workspaceFolder, comparisonRef);
 
   if (!mergeBase) {
     return [];
@@ -212,8 +306,11 @@ async function getBaseMigrationFiles(
 
 async function resolveMergeBase(
   workspaceFolder: vscode.WorkspaceFolder,
+  comparisonRef: string | null,
 ): Promise<string | null> {
-  const comparisonRefs = await getComparisonRefs(workspaceFolder);
+  const comparisonRefs = comparisonRef
+    ? [comparisonRef]
+    : await getComparisonRefs(workspaceFolder);
 
   for (const comparisonRef of comparisonRefs) {
     try {
@@ -232,6 +329,22 @@ async function resolveMergeBase(
       }
     } catch {
       continue;
+    }
+  }
+
+  if (comparisonRef) {
+    try {
+      const { stdout } = await execFileAsync(
+        'git',
+        ['rev-parse', '--verify', '--quiet', comparisonRef],
+        {
+          cwd: workspaceFolder.uri.fsPath,
+        },
+      );
+
+      return stdout.trim() || null;
+    } catch {
+      return null;
     }
   }
 
@@ -288,6 +401,159 @@ async function getComparisonRefs(
   }
 
   return [...refs];
+}
+
+async function getOriginBranches(
+  workspaceFolder: vscode.WorkspaceFolder,
+): Promise<ComparisonBranchModel[]> {
+  const defaultBranch = await resolveDefaultOriginBranch(workspaceFolder);
+
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['for-each-ref', '--format=%(refname:short)', 'refs/remotes/origin'],
+      {
+        cwd: workspaceFolder.uri.fsPath,
+      },
+    );
+
+    return parseGitPathList(stdout)
+      .filter((ref) => ref !== 'origin/HEAD')
+      .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: 'base' }))
+      .map((ref) => ({
+        isDefault: ref === defaultBranch,
+        label: ref.replace(/^origin\//, ''),
+        ref,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+async function resolveSelectedComparisonBranch(
+  workspaceFolder: vscode.WorkspaceFolder | undefined,
+  comparisonBranches: ComparisonBranchModel[],
+  selectedComparisonBranch: string | undefined,
+): Promise<string | null> {
+  if (comparisonBranches.length === 0) {
+    return null;
+  }
+
+  if (
+    selectedComparisonBranch &&
+    comparisonBranches.some((branch) => branch.ref === selectedComparisonBranch)
+  ) {
+    return selectedComparisonBranch;
+  }
+
+  const defaultBranch = workspaceFolder
+    ? await resolveDefaultOriginBranch(workspaceFolder)
+    : null;
+
+  return comparisonBranches.find((branch) => branch.ref === defaultBranch)?.ref ??
+    comparisonBranches[0]?.ref ??
+    null;
+}
+
+async function resolveDefaultOriginBranch(
+  workspaceFolder: vscode.WorkspaceFolder,
+): Promise<string | null> {
+  const currentBranch = await getCurrentBranch(workspaceFolder);
+  const configuredBaseBranch = currentBranch
+    ? await getConfiguredBaseBranch(workspaceFolder, currentBranch)
+    : null;
+
+  if (configuredBaseBranch) {
+    return configuredBaseBranch;
+  }
+
+  const remoteHead = await getRemoteHeadBranch(workspaceFolder);
+
+  if (remoteHead) {
+    return remoteHead;
+  }
+
+  for (const candidateRef of ['origin/develop', 'origin/main', 'origin/master']) {
+    try {
+      const { stdout } = await execFileAsync(
+        'git',
+        ['rev-parse', '--verify', '--quiet', candidateRef],
+        {
+          cwd: workspaceFolder.uri.fsPath,
+        },
+      );
+
+      if (stdout.trim()) {
+        return candidateRef;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+async function getCurrentBranch(
+  workspaceFolder: vscode.WorkspaceFolder,
+): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['branch', '--show-current'],
+      {
+        cwd: workspaceFolder.uri.fsPath,
+      },
+    );
+
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getConfiguredBaseBranch(
+  workspaceFolder: vscode.WorkspaceFolder,
+  currentBranch: string,
+): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['config', '--get', `branch.${currentBranch}.gh-merge-base`],
+      {
+        cwd: workspaceFolder.uri.fsPath,
+      },
+    );
+    const configuredBranch = stdout.trim();
+
+    if (configuredBranch) {
+      return configuredBranch.startsWith('origin/')
+        ? configuredBranch
+        : `origin/${configuredBranch}`;
+    }
+  } catch {
+    // Ignore missing GitHub merge-base metadata.
+  }
+
+  return null;
+}
+
+async function getRemoteHeadBranch(
+  workspaceFolder: vscode.WorkspaceFolder,
+): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'],
+      {
+        cwd: workspaceFolder.uri.fsPath,
+      },
+    );
+
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 async function getMigrationPathsAtRef(
